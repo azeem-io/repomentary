@@ -1,0 +1,33 @@
+@import "tailwindcss";
+
+@theme {
+  --color-void: #07091a;
+  --color-deep: #0b0e24;
+  --color-nebula: #6d5dfc;
+  --color-nebula-soft: #9a8cff;
+  --color-star: #e8ecff;
+  --color-ember: #ffb454;
+  --color-ink: #f4efe6;
+  --color-vermilion: #ff5d3a;
+
+  --font-sans:
+    ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, "Cascadia Code", "JetBrains Mono", Menlo, Consolas, monospace;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  background: var(--color-void);
+  color: var(--color-star);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+::selection {
+  background: var(--color-nebula);
+  color: white;
+}

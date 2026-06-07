@@ -1,0 +1,24 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "repomentary-web",
+  "main": ".open-next/worker.js",
+  "compatibility_date": "2026-05-01",
+  "compatibility_flags": [
+    // Node.js APIs for the Next.js server runtime.
+    "nodejs_compat",
+    // Disallow fetching internal/private IPs from the Worker.
+    "global_fetch_strictly_public"
+  ],
+  "assets": {
+    "directory": ".open-next/assets",
+    "binding": "ASSETS"
+  },
+  "services": [
+    {
+      "binding": "WORKER_SELF_REFERENCE",
+      "service": "repomentary-web"
+    }
+  ]
+  // Later: add R2 bucket binding NEXT_INC_CACHE_R2_BUCKET for ISR caching,
+  // and the artifacts bucket once the ingestion worker exists.
+}
