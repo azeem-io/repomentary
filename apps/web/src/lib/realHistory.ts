@@ -264,6 +264,7 @@ export function setDatasetId(id: string): void {
   } catch {
     // storage blocked, the switch still works, it just won't persist
   }
+  window.dispatchEvent(new CustomEvent("repomentary:dataset", { detail: id }));
 }
 
 const datasetById = (id: string): RepoDataset =>

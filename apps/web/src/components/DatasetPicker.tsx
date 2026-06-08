@@ -1,45 +1,58 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { getDatasetId, REPO_DATASETS, setDatasetId } from "@/lib/realHistory";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { REPO_DATASETS, setDatasetId } from "@/lib/realHistory";
+import { useDatasetId } from "@/lib/useDataset";
 
 interface Props {
   /** Called after the new selection has been persisted. */
   onPick?: (id: string) => void;
 }
 
-/**
- * The repo switcher, the same control on the homepage and on every sketch
- * page. Selection persists in localStorage so it follows you across pages.
- */
+/** The repo switcher. Selection persists and is shared across the page. */
 export default function DatasetPicker({ onPick }: Props) {
-  // Read localStorage only after mount, the server must not guess.
-  const [dataset, setDataset] = useState<string | null>(null);
-  useEffect(() => {
-    setDataset(getDatasetId());
-  }, []);
+  const dataset = useDatasetId();
 
   if (dataset === null) {
-    return <div aria-hidden className="h-[26px] w-36 rounded-md bg-black/20" />;
+    return <div aria-hidden className="h-8 w-36 rounded-md bg-deep" />;
   }
   return (
-    <select
+    <Select
       value={dataset}
-      onChange={(e) => {
-        const id = e.target.value;
+      onValueChange={(id) => {
         setDatasetId(id);
-        setDataset(id);
         onPick?.(id);
       }}
-      title={REPO_DATASETS.find((d) => d.id === dataset)?.hint}
-      aria-label="repository dataset"
-      className="pointer-events-auto cursor-pointer rounded-md border-0 bg-black/30 px-2.5 py-1.5 font-mono text-xs text-star/80 backdrop-blur transition-colors [color-scheme:dark] hover:text-star focus:outline-none"
     >
-      {REPO_DATASETS.map((d) => (
-        <option key={d.id} value={d.id} className="bg-deep text-star">
-          {d.label}
-        </option>
-      ))}
-    </select>
+      <SelectTrigger
+        size="sm"
+        aria-label="repository dataset"
+        className="pointer-events-auto w-fit gap-2 border-star/15 bg-void/60 font-mono text-[11px] text-dim backdrop-blur hover:border-star/40 hover:text-star focus-visible:ring-amber/40"
+      >
+        <SelectValue />
+      </SelectTrigger>
+      <SelectContent
+        position="popper"
+        align="start"
+        sideOffset={6}
+        className="border-star/15 bg-raised"
+      >
+        {REPO_DATASETS.map((d) => (
+          <SelectItem
+            key={d.id}
+            value={d.id}
+            className="font-mono text-xs text-dim focus:bg-amber/15 focus:text-star data-[state=checked]:text-amber"
+          >
+            {d.label}
+          </SelectItem>
+        ))}
+      </SelectContent>
+    </Select>
   );
 }

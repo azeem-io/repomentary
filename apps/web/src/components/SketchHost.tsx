@@ -1,14 +1,17 @@
 "use client";
 
-import Link from "next/link";
 import { useEffect, useReducer, useRef, useState } from "react";
 import DatasetPicker from "@/components/DatasetPicker";
+import { TransitionLink } from "@/components/PageTransition";
+import { Button } from "@/components/ui/button";
+import { Slider } from "@/components/ui/slider";
+import { Switch } from "@/components/ui/switch";
+import { SimpleTooltip } from "@/components/ui/tooltip";
 import { getDatasetId } from "@/lib/realHistory";
 import type { SketchControl, SketchInstance, Transport } from "@/sketches/common";
 
 const loaders = {
   planet: () => import("@/sketches/planet"),
-  rain: () => import("@/sketches/rain"),
   city: () => import("@/sketches/city"),
   gource: () => import("@/sketches/gource"),
   race: () => import("@/sketches/race"),
@@ -57,6 +60,8 @@ export default function SketchHost({ kind, title, hint }: Props) {
   // biome-ignore lint/correctness/useExhaustiveDependencies: `generation` intentionally forces a rebuild (backward seek / reset)
   useEffect(() => {
     const host = hostRef.current;
+    // Boot while the curtain still covers, so the canvas is ready the moment
+    // it lifts (seamless reveal, no flash of empty page).
     if (!host || dataset === null) return;
 
     // StrictMode/HMR mount-unmount races: the first instance must stop
@@ -104,9 +109,9 @@ export default function SketchHost({ kind, title, hint }: Props) {
 
       <header className="pointer-events-none absolute inset-x-0 top-0 z-10 flex items-start justify-between p-4">
         <div className="flex items-center gap-2">
-          <Link href="/" className={chipClass}>
+          <TransitionLink href="/" direction="back" className={chipClass}>
             ← repomentary
-          </Link>
+          </TransitionLink>
           <DatasetPicker onPick={(id) => setDataset(id)} />
         </div>
         <div className="mr-[252px] rounded-md bg-black/30 px-3 py-1.5 text-right backdrop-blur">
@@ -122,38 +127,47 @@ export default function SketchHost({ kind, title, hint }: Props) {
               the end
             </span>
           )}
-          <button
-            type="button"
-            title={ended ? "history fully played — press ⟲ to replay" : "play / pause"}
-            disabled={ended}
-            onClick={() => {
-              transport.toggle();
-              rerender();
-            }}
-            className={`${chipClass} disabled:opacity-40`}
-          >
-            {ended ? "⏹" : transport.paused() ? "▶" : "⏸"}
-          </button>
-          <button
-            type="button"
-            title="fast-forward (1× → 2× → 4× → 8×)"
-            disabled={ended}
-            onClick={() => {
-              transport.cycleSpeed();
-              rerender();
-            }}
-            className={`${chipClass} disabled:opacity-40 ${transport.speed() > 1 ? "text-ember" : ""}`}
-          >
-            {transport.speed()}×
-          </button>
-          <button
-            type="button"
-            title="restart the film"
-            onClick={() => transport.reset()}
-            className={`${chipClass} ${ended ? "text-ember" : ""}`}
-          >
-            ⟲
-          </button>
+          <SimpleTooltip content={ended ? "replay from the start" : "play / pause"}>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              disabled={ended}
+              onClick={() => {
+                transport.toggle();
+                rerender();
+              }}
+              className="pointer-events-auto h-8 bg-black/30 px-3 font-mono text-xs text-star/70 shadow-none backdrop-blur hover:bg-black/40 hover:text-star disabled:opacity-40"
+            >
+              {ended ? "⏹" : transport.paused() ? "▶" : "⏸"}
+            </Button>
+          </SimpleTooltip>
+          <SimpleTooltip content="fast-forward (1x, 2x, 4x, 8x)">
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              disabled={ended}
+              onClick={() => {
+                transport.cycleSpeed();
+                rerender();
+              }}
+              className={`pointer-events-auto h-8 bg-black/30 px-3 font-mono text-xs text-star/70 shadow-none backdrop-blur hover:bg-black/40 hover:text-star disabled:opacity-40 ${transport.speed() > 1 ? "text-ember hover:text-ember" : ""}`}
+            >
+              {transport.speed()}×
+            </Button>
+          </SimpleTooltip>
+          <SimpleTooltip content="restart the film">
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              onClick={() => transport.reset()}
+              className={`pointer-events-auto h-8 bg-black/30 px-3 font-mono text-xs text-star/70 shadow-none backdrop-blur hover:bg-black/40 hover:text-star ${ended ? "text-ember hover:text-ember" : ""}`}
+            >
+              ⟲
+            </Button>
+          </SimpleTooltip>
         </div>
       )}
 
@@ -173,33 +187,30 @@ export default function SketchHost({ kind, title, hint }: Props) {
                             : ""}
                         </span>
                       </span>
-                      <input
-                        type="range"
+                      <Slider
                         min={c.min ?? 0}
                         max={c.max ?? 1}
                         step={c.step ?? 0.05}
-                        value={typeof c.value === "number" ? c.value : 0}
-                        onChange={(e) => {
-                          const v = Number(e.target.value);
+                        value={[typeof c.value === "number" ? c.value : 0]}
+                        onValueChange={(vals) => {
+                          const v = vals[0] ?? 0;
                           c.value = v;
                           c.set(v);
                           rerender();
                         }}
-                        className="mt-0.5 w-full accent-nebula"
+                        className="mt-2 [&_[data-slot=slider-track]]:bg-star/15"
                       />
                     </label>
                   ) : (
                     <label className="flex items-center justify-between font-mono text-[11px] text-star/70">
                       <span>{c.label}</span>
-                      <input
-                        type="checkbox"
+                      <Switch
                         checked={c.value === true}
-                        onChange={(e) => {
-                          c.value = e.target.checked;
-                          c.set(e.target.checked);
+                        onCheckedChange={(checked) => {
+                          c.value = checked;
+                          c.set(checked);
                           rerender();
                         }}
-                        className="accent-nebula"
                       />
                     </label>
                   )}
@@ -207,9 +218,15 @@ export default function SketchHost({ kind, title, hint }: Props) {
               ))}
             </div>
           )}
-          <button type="button" onClick={() => setPanelOpen((open) => !open)} className={chipClass}>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            onClick={() => setPanelOpen((open) => !open)}
+            className="pointer-events-auto h-8 bg-black/30 px-3 font-mono text-xs text-star/70 shadow-none backdrop-blur hover:bg-black/40 hover:text-star"
+          >
             {panelOpen ? "✕ tuning" : "⚙ tuning"}
-          </button>
+          </Button>
         </div>
       )}
 

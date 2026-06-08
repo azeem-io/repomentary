@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import SketchHost from "@/components/SketchHost";
 
 export const metadata: Metadata = {
-  title: "City — Repomentary motion sketch",
+  title: "City · Repomentary motion sketch",
 };
 
 export default function CitySketchPage() {

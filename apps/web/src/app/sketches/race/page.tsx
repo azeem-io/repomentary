@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import SketchHost from "@/components/SketchHost";
 
 export const metadata: Metadata = {
-  title: "Race — Repomentary motion sketch (real data)",
+  title: "Race · Repomentary motion sketch (real data)",
 };
 
 export default function RaceSketchPage() {

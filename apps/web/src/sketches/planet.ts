@@ -345,7 +345,7 @@ export async function createSketch(
     syncChip();
   });
   const syncChip = () => {
-    chip.text = `[ labels: ${labelsOn ? "on" : "off"} — T ]`;
+    chip.text = `[ labels: ${labelsOn ? "on" : "off"} · T ]`;
   };
   syncChip();
   ui.addChild(chip);

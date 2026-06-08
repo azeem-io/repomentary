@@ -1,18 +1,102 @@
 @import "tailwindcss";
+@import "tw-animate-css";
 
 @theme {
-  --color-void: #07091a;
-  --color-deep: #0b0e24;
+  /* Surfaces, darkest to most raised. */
+  --color-void: #05070e;
+  --color-deep: #090c16;
+  --color-raised: #0b0f1d;
+
+  /* Text. */
+  --color-star: #f3ece0;
+  --color-cream: #d8cebb;
+  --color-dim: #9aa0b4;
+  --color-faint: #5b6073;
+
+  /* Accent. */
+  --color-amber: #f2b441;
+  --color-amber-soft: #f7c977;
+
+  /* Legacy tokens still referenced by sketch-page UI. */
   --color-nebula: #6d5dfc;
-  --color-nebula-soft: #9a8cff;
-  --color-star: #e8ecff;
-  --color-ember: #ffb454;
-  --color-ink: #f4efe6;
+  --color-nebula-soft: #9aa0b4;
+  --color-ember: #f2b441;
   --color-vermilion: #ff5d3a;
 
+  --font-display: "Bricolage Grotesque Variable", ui-sans-serif, system-ui, sans-serif;
+  --font-serif: "Instrument Serif", Georgia, serif;
   --font-sans:
     ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-  --font-mono: ui-monospace, "Cascadia Code", "JetBrains Mono", Menlo, Consolas, monospace;
+  --font-mono: "IBM Plex Mono", ui-monospace, "Cascadia Code", Menlo, Consolas, monospace;
+}
+
+/* shadcn/ui semantic tokens, mapped to our palette (dark-only). Components
+   added via the shadcn CLI inherit our identity through these. */
+:root {
+  --background: #05070e;
+  --foreground: #f3ece0;
+  --card: #0b0f1d;
+  --card-foreground: #f3ece0;
+  --popover: #0b0f1d;
+  --popover-foreground: #f3ece0;
+  --primary: #f2b441;
+  --primary-foreground: #05070e;
+  --secondary: #090c16;
+  --secondary-foreground: #f3ece0;
+  --muted: #090c16;
+  --muted-foreground: #9aa0b4;
+  --accent: #131829;
+  --accent-foreground: #f3ece0;
+  --destructive: #ff5d3a;
+  --border: #1b2133;
+  --input: #1b2133;
+  --ring: #f2b441;
+  --radius: 0.5rem;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+}
+
+/* Smooth tooltip fade (shared by Radix tooltips + the grid floating tip). */
+@keyframes rm-tip {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+.rm-tip {
+  animation: rm-tip 120ms ease;
+}
+
+.grid-cols-24 {
+  grid-template-columns: repeat(24, minmax(0, 1fr));
+}
+
+html {
+  scroll-behavior: smooth;
 }
 
 html,
@@ -28,6 +112,115 @@ body {
 }
 
 ::selection {
-  background: var(--color-nebula);
-  color: white;
+  background: var(--color-amber);
+  color: var(--color-void);
+}
+
+/* Entrance + curtain (left-to-right wipe) motion. */
+@keyframes rm-rise {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes rm-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* Branded curtain wipe (shutter variant): one continuous sweep with a hold
+   at full coverage, where the route swaps and the logo flashes. Forward goes
+   left to right; back mirrors it. Easing + timing tuned to feel deliberate. */
+@keyframes rm-curtain-fwd {
+  0% {
+    transform: translateX(-101%);
+  }
+  40%,
+  60% {
+    transform: translateX(0);
+  }
+  100% {
+    transform: translateX(101%);
+  }
+}
+@keyframes rm-curtain-back {
+  0% {
+    transform: translateX(101%);
+  }
+  40%,
+  60% {
+    transform: translateX(0);
+  }
+  100% {
+    transform: translateX(-101%);
+  }
+}
+@keyframes rm-curtain-logo {
+  0%,
+  26% {
+    opacity: 0;
+    transform: scale(0.9);
+  }
+  40%,
+  60% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  74%,
+  100% {
+    opacity: 0;
+    transform: scale(1.1);
+  }
+}
+
+.curtain-fwd {
+  animation: rm-curtain-fwd 920ms cubic-bezier(0.7, 0, 0.2, 1) forwards;
+}
+.curtain-back {
+  animation: rm-curtain-back 920ms cubic-bezier(0.7, 0, 0.2, 1) forwards;
+}
+.curtain-logo {
+  animation: rm-curtain-logo 920ms cubic-bezier(0.7, 0, 0.2, 1) forwards;
+}
+
+/* Central gate: while the curtain is covering, hold every entrance animation
+   at its first frame so nothing plays until the new page is revealed. */
+.rm-entering .animate-rise,
+.rm-entering .animate-fade {
+  animation-play-state: paused !important;
+}
+
+/* Timeline draws itself in, left to right, when scrolled into view. */
+@keyframes rm-wipe {
+  to {
+    clip-path: inset(0 0 0 0);
+  }
+}
+.tl-reveal {
+  clip-path: inset(0 100% 0 0);
+}
+.tl-reveal.tl-in {
+  animation: rm-wipe 1.1s cubic-bezier(0.7, 0, 0.2, 1) forwards;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+  .animate-rise,
+  .animate-fade {
+    animation: none !important;
+  }
+  .tl-reveal {
+    clip-path: none !important;
+    animation: none !important;
+  }
 }

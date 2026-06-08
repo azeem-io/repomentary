@@ -27,7 +27,6 @@ between the bundled repos (vite, react, svelte, express, chrono).
 | `/sketches/city` | a skyline in time-lapse, with construction cranes for branches and a day/night cycle per repo-year |
 | `/sketches/gource` | a force-directed file tree, after Andrew Caudwell's Gource |
 | `/sketches/race` | a contributor bar chart race over a directory streamgraph. No metaphors, just charts |
-| `/sketches/rain` | drops falling into rising water, with real spring-wave physics |
 | `/sketches/planet` | a living world whose territories are directories |
 | `/sketches/layout-test` | a 10k-node force layout stress test |
 
@@ -94,7 +93,7 @@ then register it in `apps/web/src/lib/realHistory.ts`.
 
 1. Foundation and visual identity (where things are now)
 2. Ingestion pipeline for arbitrary GitHub URLs
-3. The film itself: one polished visual direction with cinematic pacing
+3. The film itself: the sketches grown into selectable film styles
 4. Sharing and launch
 5. Accounts and saved repos
 6. Embeds and themes
