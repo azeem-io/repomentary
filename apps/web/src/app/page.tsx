@@ -85,7 +85,7 @@ export default function Home() {
             <Wordmark size="hero" />
           </h1>
           <p className="mt-6 max-w-md animate-rise font-serif text-2xl leading-snug text-cream [animation-delay:90ms] sm:text-3xl">
-            Git history, played back as a film you can scrub.
+            History Of The Entire Git, I Guess
           </p>
           <div className="mt-10 w-full animate-rise [animation-delay:180ms]">
             <HomeHero />

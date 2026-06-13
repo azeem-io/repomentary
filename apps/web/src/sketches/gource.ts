@@ -9,6 +9,7 @@
 import { mulberry32, type Rng } from "@repomentary/artifact";
 import {
   type ForceLink,
+  forceCollide,
   forceLink,
   forceManyBody,
   forceSimulation,
@@ -44,6 +45,7 @@ const DELETE_RED = 0xff5d3a;
 const PLAY_SECONDS = 300; // whole history at 1x
 
 interface DirNode extends SimulationNodeDatum {
+  kind: "dir";
   path: string;
   name: string;
   depth: number;
@@ -55,21 +57,22 @@ interface DirNode extends SimulationNodeDatum {
   dying: number;
 }
 
-type DirLink = SimulationLinkDatum<DirNode>;
-
-interface FileNode {
+interface FileNode extends SimulationNodeDatum {
+  kind: "file";
   pathIdx: number;
   dir: DirNode;
-  slot: number;
   color: number;
   sprite: Sprite;
   flash: number;
   dying: number;
+  deleted: boolean;
+  lastTouched: number;
   labelAge: number;
   label: Text | null;
-  x: number;
-  y: number;
 }
+
+type SimNode = DirNode | FileNode;
+type SimLink = SimulationLinkDatum<SimNode>;
 
 interface UserNode {
   author: number;
@@ -176,7 +179,14 @@ export async function createSketch(
   }
 
   const rng: Rng = mulberry32(7);
-  const params = { glow: 1, beams: 1, maxUsers: 14, fileLabels: true };
+  const params = {
+    glow: 1,
+    beams: 1,
+    maxUsers: 14,
+    fileLabels: true,
+    dirLabelDepth: 2,
+    fileLife: 0.04,
+  };
   const glowTex = makeGlowTexture(64);
   const dotTex = makeDotTexture(16);
   const ringTex = makeRingTexture(128);
@@ -205,29 +215,45 @@ export async function createSketch(
   /* ------------------------------- tree model ------------------------------- */
 
   const dirs = new Map<string, DirNode>();
-  const nodes: DirNode[] = [];
-  const links: DirLink[] = [];
+  const nodes: SimNode[] = [];
+  const links: SimLink[] = [];
 
-  const simulation = forceSimulation<DirNode>(nodes)
+  const simulation = forceSimulation<SimNode>(nodes)
     .force(
       "link",
-      forceLink<DirNode, DirLink>(links)
+      forceLink<SimNode, SimLink>(links)
         .distance((l) => {
-          const t = l.target as DirNode;
-          return 18 + 46 / (t.depth * 0.55 + 1);
+          const t = l.target as SimNode;
+          // Files sit close to their dir (short leaf springs); dirs branch out.
+          return t.kind === "file" ? 8 : 18 + 46 / (t.depth * 0.55 + 1);
         })
-        .strength(0.85),
+        .strength((l) => ((l.target as SimNode).kind === "file" ? 0.9 : 0.85)),
     )
-    .force("charge", forceManyBody<DirNode>().strength(-42).theta(0.9).distanceMax(420))
-    .force("x", forceX<DirNode>(0).strength(0.012))
-    .force("y", forceY<DirNode>(0).strength(0.012))
+    .force(
+      "charge",
+      // Files don't repel at all — collision alone stops overlap, so they pack
+      // into a tight cluster on their hub instead of a wide sunburst. Dirs still
+      // push apart hard so the tree branches read clearly.
+      forceManyBody<SimNode>()
+        .strength((n) => (n.kind === "file" ? 0 : -55))
+        .theta(0.9)
+        .distanceMax(300),
+    )
+    .force("collide", forceCollide<SimNode>((n) => (n.kind === "file" ? 3.4 : 9)).strength(1))
+    .force("x", forceX<SimNode>(0).strength(0.012))
+    .force("y", forceY<SimNode>(0).strength(0.012))
     .alphaDecay(0.015)
     .alphaTarget(0.05)
     .stop();
 
+  // Batch sim rebuilds: many touchFile calls in one commit flush once per frame.
+  let simDirty = false;
+  const markSim = () => {
+    simDirty = true;
+  };
   const syncSim = () => {
     simulation.nodes(nodes);
-    (simulation.force("link") as ForceLink<DirNode, DirLink>).links(links);
+    (simulation.force("link") as ForceLink<SimNode, SimLink>).links(links);
     simulation.alpha(Math.max(simulation.alpha(), 0.45));
   };
 
@@ -252,6 +278,7 @@ export async function createSketch(
     const angle = (hashStr(dirPath) % 6283) / 1000;
     const dist = parent ? 30 : 0;
     const node: DirNode = {
+      kind: "dir",
       path: dirPath,
       name,
       depth: parent ? parent.depth + 1 : 0,
@@ -271,7 +298,7 @@ export async function createSketch(
       parent.childDirs++;
       links.push({ source: parent, target: node });
     }
-    syncSim();
+    markSim();
     return node;
   };
 
@@ -286,18 +313,6 @@ export async function createSketch(
   const fileLabelBudget = 12;
   let activeFileLabels = 0;
 
-  const filePosition = (f: FileNode): { x: number; y: number } => {
-    const ring = Math.floor(f.slot / 9);
-    const idx = f.slot % 9;
-    const golden = (hashStr(real.paths[f.pathIdx] ?? "") % 628) / 100;
-    const angle = golden + (idx / 9) * Math.PI * 2;
-    const radius = 12 + ring * 7;
-    return {
-      x: (f.dir.x ?? 0) + Math.cos(angle) * radius,
-      y: (f.dir.y ?? 0) + Math.sin(angle) * radius,
-    };
-  };
-
   const touchFile = (pathIdx: number, op: 0 | 1 | 2): FileNode | null => {
     const path = real.paths[pathIdx];
     if (!path) return null;
@@ -306,6 +321,7 @@ export async function createSketch(
     if (op === 2) {
       if (f && f.dying === 0) {
         f.dying = 0.001;
+        f.deleted = true;
         f.sprite.tint = DELETE_RED;
         f.flash = 1;
       }
@@ -320,25 +336,32 @@ export async function createSketch(
       const ext = extOf(path);
       const color = hueColor((hashStr(ext) % 360) / 360);
       sprite.tint = color;
-      sprite.scale.set(0.001);
+      sprite.scale.set(0.06);
       fileLayer.addChild(sprite);
+      const jitter = () => (Math.random() - 0.5) * 16;
       f = {
+        kind: "file",
         pathIdx,
         dir,
-        slot: dir.files.length,
         color,
         sprite,
         flash: 1,
         dying: 0,
+        deleted: false,
+        lastTouched: simSec,
         labelAge: 99,
         label: null,
-        x: dir.x ?? 0,
-        y: dir.y ?? 0,
+        x: (dir.x ?? 0) + jitter(),
+        y: (dir.y ?? 0) + jitter(),
       };
       dir.files.push(f);
       files.set(pathIdx, f);
+      nodes.push(f);
+      links.push({ source: dir, target: f });
+      markSim();
     } else {
       f.flash = 1;
+      f.lastTouched = simSec;
     }
 
     // Briefly label touched files (budgeted).
@@ -544,9 +567,8 @@ export async function createSketch(
         if (!change) continue;
         const f = touchFile(change[1], change[0]);
         if (f) {
-          const pos = filePosition(f);
-          cx2 += pos.x;
-          cy2 += pos.y;
+          cx2 += f.x ?? 0;
+          cy2 += f.y ?? 0;
           n++;
           if (ci % beamEvery === 0 && beams.length < 150 * params.beams) {
             beams.push({ user: u, file: f, age: 0 });
@@ -643,6 +665,10 @@ export async function createSketch(
     }
     const progress = clamp01(simSec / real.spanSec);
 
+    if (simDirty) {
+      syncSim();
+      simDirty = false;
+    }
     simulation.tick();
 
     /* ----- dirs: edges + labels + decay ----- */
@@ -654,6 +680,7 @@ export async function createSketch(
     for (let i = nodes.length - 1; i >= 0; i--) {
       const d = nodes[i];
       if (!d) continue;
+      if (d.kind !== "dir") continue; // files are handled in the file loop
       if (d.dying > 0) {
         d.dying += dtMs / 600;
         if (d.dying >= 1) {
@@ -677,17 +704,19 @@ export async function createSketch(
       maxX = Math.max(maxX, x);
       minY = Math.min(minY, y);
       maxY = Math.max(maxY, y);
+      const dirFade = d.dying > 0 ? 1 - d.dying : 1;
       if (d.parent) {
-        const fade = d.dying > 0 ? 1 - d.dying : 1;
         edgeGfx
           .moveTo(d.parent.x ?? 0, d.parent.y ?? 0)
           .lineTo(x, y)
-          .stroke({ color: hueColor(d.hue, 0.4, 0.5), alpha: 0.34 * fade, width: 1.2 });
+          .stroke({ color: hueColor(d.hue, 0.4, 0.5), alpha: 0.34 * dirFade, width: 1.2 });
       }
+      // Hub: a soft disc whose size grows with the folder's file count.
+      const hubR = 2 + Math.sqrt(d.files.length) * 1.7;
+      edgeGfx.circle(x, y, hubR).fill({ color: hueColor(d.hue, 0.5, 0.55), alpha: 0.12 * dirFade });
       if (d.label) {
-        const maxLabelDepth = nodes.length > 90 ? 1 : 2;
         const show =
-          labelsOn && d.depth <= maxLabelDepth && (d.files.length > 0 || d.childDirs > 0);
+          labelsOn && d.depth <= params.dirLabelDepth && (d.files.length > 0 || d.childDirs > 0);
         d.label.alpha += ((show ? 0.75 : 0) - d.label.alpha) * Math.min(1, dtMs / 300);
         d.label.position.set(x, y - 8);
         d.label.scale.set(Math.min(1.2, 1 / zoom) * (d.depth === 0 ? 1.25 : 1));
@@ -695,20 +724,29 @@ export async function createSketch(
     }
 
     /* ----- files ----- */
+    const fileTtl = real.spanSec * params.fileLife;
     for (const f of files.values()) {
       f.flash = Math.max(0, f.flash - dtMs / 900);
-      const pos = filePosition(f);
-      f.x = pos.x;
-      f.y = pos.y;
+      const fx = f.x ?? 0;
+      const fy = f.y ?? 0;
+      // Idle files fade out and get reclaimed (keeps the active tree small,
+      // like Gource's file-idle-time — this is the perf + zoom fix).
+      if (f.dying === 0 && simSec - f.lastTouched > fileTtl) f.dying = 0.001;
       if (f.dying > 0) {
-        f.dying += dtMs / 900;
+        // Deletes flash red and vanish fast; idle files fade out gently.
+        f.dying += f.deleted ? dtMs / 260 : dtMs / 900;
         if (f.dying >= 1) {
           f.sprite.destroy();
           f.label?.destroy();
           if (f.label) activeFileLabels--;
           const idx = f.dir.files.indexOf(f);
           if (idx !== -1) f.dir.files.splice(idx, 1);
+          const ni = nodes.indexOf(f);
+          if (ni !== -1) nodes.splice(ni, 1);
+          const lfi = links.findIndex((l) => l.target === f);
+          if (lfi !== -1) links.splice(lfi, 1);
           files.delete(f.pathIdx);
+          markSim();
           removeDirIfEmpty(f.dir);
           continue;
         }
@@ -717,9 +755,19 @@ export async function createSketch(
         f.sprite.alpha = 0.92;
       }
       const target = 0.18 + Math.min(0.1, f.dir.files.length * 0.001) + f.flash * 0.3;
-      f.sprite.scale.set(f.sprite.scale.x + (target - f.sprite.scale.x) * Math.min(1, dtMs / 180));
-      f.sprite.position.set(f.x, f.y);
-      f.sprite.tint = f.dying > 0 ? DELETE_RED : f.flash > 0.8 ? 0xffffff : f.color;
+      f.sprite.scale.set(f.sprite.scale.x + (target - f.sprite.scale.x) * Math.min(1, dtMs / 110));
+      f.sprite.position.set(fx, fy);
+      f.sprite.tint = f.deleted ? DELETE_RED : f.flash > 0.8 ? 0xffffff : f.color;
+      minX = Math.min(minX, fx);
+      maxX = Math.max(maxX, fx);
+      minY = Math.min(minY, fy);
+      maxY = Math.max(maxY, fy);
+      // Leaf edge: files dangle off their directory like Gource's leaves.
+      const leafFade = f.dying > 0 ? 1 - f.dying : 1;
+      edgeGfx
+        .moveTo(f.dir.x ?? 0, f.dir.y ?? 0)
+        .lineTo(fx, fy)
+        .stroke({ color: f.color, alpha: (0.13 + f.flash * 0.25) * leafFade, width: 0.8 });
       if (f.label) {
         f.labelAge += dtMs / 1000;
         if (f.labelAge > 1.0) {
@@ -727,7 +775,7 @@ export async function createSketch(
           f.label = null;
           activeFileLabels--;
         } else {
-          f.label.position.set(f.x + 6, f.y);
+          f.label.position.set(fx + 6, fy);
           f.label.alpha = (labelsOn ? 0.85 : 0.4) * (1 - f.labelAge / 1.0);
           f.label.scale.set(Math.min(1.4, 1 / zoom));
         }
@@ -769,17 +817,19 @@ export async function createSketch(
         beams.splice(i, 1);
         continue;
       }
+      const bfx = b.file.x ?? 0;
+      const bfy = b.file.y ?? 0;
       beamGfx
         .moveTo(b.user.x, b.user.y)
-        .lineTo(b.file.x, b.file.y)
+        .lineTo(bfx, bfy)
         .stroke({
           color: b.user.color,
           alpha: (1 - k) * 0.55 * Math.min(1.5, params.glow),
           width: 2,
         });
       // Spark racing from the contributor to the file.
-      const sx = b.user.x + (b.file.x - b.user.x) * k;
-      const sy = b.user.y + (b.file.y - b.user.y) * k;
+      const sx = b.user.x + (bfx - b.user.x) * k;
+      const sy = b.user.y + (bfy - b.user.y) * k;
       beamGfx
         .circle(sx, sy, 2.6 / Math.max(0.35, zoom))
         .fill({ color: 0xffffff, alpha: (1 - k) * Math.min(1, params.glow) });
@@ -807,7 +857,7 @@ export async function createSketch(
       const bh = Math.max(120, maxY - minY + margin * 2);
       const cw = chrome.contentWidth(app.screen.width);
       const ch = chrome.contentHeight(app.screen.height);
-      const targetZoom = Math.max(0.1, Math.min(1.6, Math.min(cw / bw, ch / bh)));
+      const targetZoom = Math.max(0.3, Math.min(1.6, Math.min(cw / bw, ch / bh)));
       const targetX = (minX + maxX) / 2;
       const targetY = (minY + maxY) / 2;
       const ease = Math.min(1, dtMs / 900);
@@ -835,7 +885,7 @@ export async function createSketch(
       }
       if (!tipMsg) {
         for (const f of files.values()) {
-          if (Math.hypot(wx - f.x, wy - f.y) < r) {
+          if (Math.hypot(wx - (f.x ?? 0), wy - (f.y ?? 0)) < r) {
             tipMsg = real.paths[f.pathIdx] ?? null;
             break;
           }
@@ -843,6 +893,7 @@ export async function createSketch(
       }
       if (!tipMsg) {
         for (const d of nodes) {
+          if (d.kind !== "dir") continue;
           if (Math.hypot(wx - (d.x ?? 0), wy - (d.y ?? 0)) < r + 3) {
             tipMsg = `${d.path === "" ? "(root)" : `${d.path}/`} · ${d.files.length} files`;
             break;
@@ -855,7 +906,7 @@ export async function createSketch(
     /* ----- chrome & hud ----- */
     chrome.update(dtMs, app.screen.width, app.screen.height, progress, [
       ["files", files.size],
-      ["dirs", nodes.length],
+      ["dirs", dirs.size],
       ["devs now", users.size],
       ["speed", `${speed.toFixed(2).replace(/\.?0+$/, "")}×`],
     ]);
@@ -868,7 +919,7 @@ export async function createSketch(
 
     hud.update(
       dtMs,
-      `${files.size} files · ${nodes.length} dirs · ${users.size} devs · ${beams.length} beams`,
+      `${files.size} files · ${dirs.size} dirs · ${users.size} devs · ${beams.length} beams`,
     );
   };
 
@@ -937,6 +988,30 @@ export async function createSketch(
         value: true,
         set: (v) => {
           params.fileLabels = v as boolean;
+        },
+      },
+      {
+        key: "dirLabelDepth",
+        label: "folder label depth",
+        kind: "range",
+        min: 0,
+        max: 5,
+        step: 1,
+        value: 2,
+        set: (v) => {
+          params.dirLabelDepth = v as number;
+        },
+      },
+      {
+        key: "fileLife",
+        label: "file lifetime",
+        kind: "range",
+        min: 0.01,
+        max: 0.2,
+        step: 0.01,
+        value: 0.04,
+        set: (v) => {
+          params.fileLife = v as number;
         },
       },
     ],
