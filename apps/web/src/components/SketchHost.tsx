@@ -16,6 +16,13 @@ const loaders = {
   gource: () => import("@/sketches/gource"),
   race: () => import("@/sketches/race"),
   civilization: () => import("@/sketches/civilization"),
+  rings: () => import("@/sketches/rings"),
+  sigil: () => import("@/sketches/sigil"),
+  flow: () => import("@/sketches/flow"),
+  tide: () => import("@/sketches/language-tide"),
+  glass: () => import("@/sketches/stained-glass"),
+  pulse: () => import("@/sketches/pulse"),
+  circuit: () => import("@/sketches/circuit"),
   layout: () => import("@/sketches/layout-test"),
 } as const;
 

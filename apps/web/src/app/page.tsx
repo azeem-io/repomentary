@@ -37,6 +37,48 @@ const styles = [
     name: "Planet",
     blurb: "A flat planet whose territories are directories. Branches orbit until they merge home.",
   },
+  {
+    id: "rings",
+    name: "Rings",
+    blurb:
+      "A painted portrait of the repo. Each growth ring is a slice of time, sized by activity and tinted by language.",
+  },
+  {
+    id: "sigil",
+    name: "Sigil",
+    blurb:
+      "A molten crest forged from the repo's structure. Each major directory becomes a glowing rune, intersecting into one emblem.",
+  },
+  {
+    id: "flow",
+    name: "Flow",
+    blurb:
+      "A flowing painting of the repo. Particles drift through a seeded field and smear into light-ribbons colored by the languages.",
+  },
+  {
+    id: "tide",
+    name: "Language Tide",
+    blurb:
+      "A streamgraph of languages over time. Flowing bands rise and fall as the codebase shifts from one language to another.",
+  },
+  {
+    id: "glass",
+    name: "Stained Glass",
+    blurb:
+      "An ever-expanding leaded mosaic. Every file is a jewel shard cut into the window when born, flaring with each commit.",
+  },
+  {
+    id: "pulse",
+    name: "Pulse",
+    blurb:
+      "The repo's vital signs. A seismograph lane per contributor spikes with their commits and flatlines when they go quiet.",
+  },
+  {
+    id: "circuit",
+    name: "Circuit",
+    blurb:
+      "The repo as a printed circuit board. Directories are chips wired to a hub; every commit fires a current pulse down the trace.",
+  },
 ] as const;
 
 function Wordmark({ size }: { size: "nav" | "hero" }) {
@@ -61,10 +103,10 @@ export default function Home() {
           <Wordmark size="nav" />
           <div className="flex items-center gap-2">
             <a
-              href="#styles"
+              href="#views"
               className="hidden px-3 py-1.5 font-mono text-[11px] tracking-[0.18em] text-dim uppercase transition-colors hover:text-star sm:block"
             >
-              styles
+              views
             </a>
             <div className="hidden sm:block">
               <DatasetPicker />
@@ -95,11 +137,11 @@ export default function Home() {
         <RepoStats />
         <InsightsLink />
 
-        <section id="styles" className="scroll-mt-20 pt-16 pb-20">
+        <section id="views" className="scroll-mt-20 pt-16 pb-20">
           <div className="flex flex-wrap items-baseline justify-between gap-2">
             <h2 className="font-display text-3xl font-bold">Now Showing</h2>
             <p className="font-mono text-[11px] tracking-[0.2em] text-faint uppercase">
-              five styles, one history · select one to screen
+              {styles.length} views, one history · select one to screen
             </p>
           </div>
 
