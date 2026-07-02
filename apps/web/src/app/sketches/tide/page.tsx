@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import SketchHost from "@/components/SketchHost";
 
 export const metadata: Metadata = {
-  title: "Language Tide · Repomentary motion sketch (real data)",
+  title: "Tide · Repomentary motion sketch (real data)",
 };
 
 export default function TideSketchPage() {
@@ -10,7 +10,7 @@ export default function TideSketchPage() {
     <main>
       <SketchHost
         kind="tide"
-        title="LANGUAGE TIDE · REAL DATA"
+        title="TIDE · REAL DATA"
         hint="space: pause · ↑/↓: speed · T: labels · scrub the timeline"
       />
     </main>

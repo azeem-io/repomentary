@@ -31,6 +31,7 @@ import {
   clamp01,
   consumePendingSeek,
   FrameGovernor,
+  makeCaptureHandle,
   makeDotTexture,
   makeGlowTexture,
   makeRingTexture,
@@ -932,6 +933,16 @@ export async function createSketch(
       boot.destroy();
     },
     transport,
+    capture: makeCaptureHandle(app, {
+      title: real.repo,
+      history: real.chromeHistory,
+      accent: 0x8fd0ff,
+      setChromeHidden: (b) => chrome.setHidden(b),
+      setHudVisible: (b) => hud.setVisible(b),
+      setLabels: (b) => {
+        labelsOn = b;
+      },
+    }),
     controls: [
       {
         key: "speed",

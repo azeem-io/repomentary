@@ -11,7 +11,7 @@ export default function RaceSketchPage() {
       <SketchHost
         kind="race"
         title="RACE · REAL DATA"
-        hint="hover: details · ⚙ tuning for bars & streamgraph"
+        hint="hover: details · ⚙ tuning for bars & pacing"
       />
     </main>
   );

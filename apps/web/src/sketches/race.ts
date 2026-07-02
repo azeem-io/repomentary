@@ -1,24 +1,24 @@
 /**
  * Race sketch: no metaphors, just charts. A contributor bar chart race with
- * eased rank swaps and a self-rescaling axis, plus a directory streamgraph
- * revealed up to the playhead underneath.
+ * eased rank swaps and a self-rescaling axis.
  *
- * Hover bars or bands for details. Tuning panel controls bar count and the
- * streamgraph.
+ * Hover bars for details. Tuning panel controls bar count and snappiness.
  */
 import type { RepoEvent } from "@repomentary/artifact";
 import { Container, Graphics, Text } from "pixi.js";
 import { loadSharedHistory } from "@/lib/realHistory";
 import { FilmChrome } from "./chrome";
-import { bootPixi, EventPlayer, FrameGovernor, type SketchInstance } from "./common";
+import {
+  bootPixi,
+  EventPlayer,
+  FrameGovernor,
+  makeCaptureHandle,
+  type SketchInstance,
+} from "./common";
 
 const INK = 0xe8ecff;
 const DIM = 0x8c93b8;
 const ACCENT = 0x4ecdc4;
-const STREAM_COLORS = [
-  0x6d5dfc, 0x4ecdc4, 0xffa3c2, 0xffd28f, 0x8fd0ff, 0xa5ffd0, 0xc2a8ff, 0xff8f70, 0xb8e986,
-  0x7ea6ff,
-];
 
 interface Bar {
   author: number;
@@ -88,7 +88,7 @@ export async function createSketch(
     throw new DOMException("cancelled", "AbortError");
   }
 
-  const params = { bars: 12, snappiness: 1, stream: true };
+  const params = { bars: 12, snappiness: 1 };
   const governor = new FrameGovernor();
   const chrome = new FilmChrome(ui, history, {
     repoName,
@@ -100,40 +100,12 @@ export async function createSketch(
 
   /* ------------------------------ layer stack ------------------------------ */
 
-  const streamGfx = new Graphics();
   const gridGfx = new Graphics();
   const barGfx = new Graphics();
   const labelLayer = new Container();
-  world.addChild(streamGfx, gridGfx, barGfx, labelLayer);
+  world.addChild(gridGfx, barGfx, labelLayer);
 
   const gridLabels: Text[] = [];
-  const streamLabels: Text[] = [];
-
-  /* ------------------------- precomputed streamgraph ------------------------- */
-
-  // Per-cluster activity in 72 time buckets (commit=1, merge=2.5).
-  const BUCKETS = 72;
-  const clusterCount = history.clusters;
-  const streamData: number[][] = Array.from({ length: clusterCount }, () =>
-    new Array<number>(BUCKETS).fill(0),
-  );
-  for (const e of history.events) {
-    if (e.kind !== "commit" && e.kind !== "merge") continue;
-    const b = Math.min(BUCKETS - 1, Math.floor((e.t / history.duration) * BUCKETS));
-    const row = streamData[e.cluster % clusterCount];
-    if (row) row[b] = (row[b] ?? 0) + (e.kind === "merge" ? 2.5 : 1);
-  }
-  // Smooth each row slightly (moving average of 3) and find column maxima.
-  for (const row of streamData) {
-    for (let i = 1; i < BUCKETS - 1; i++) {
-      row[i] = ((row[i - 1] ?? 0) + (row[i] ?? 0) * 2 + (row[i + 1] ?? 0)) / 4;
-    }
-  }
-  const columnTotal: number[] = new Array(BUCKETS).fill(0);
-  for (let b = 0; b < BUCKETS; b++) {
-    for (const row of streamData) columnTotal[b] = (columnTotal[b] ?? 0) + (row[b] ?? 0);
-  }
-  const maxColumn = Math.max(1, ...columnTotal);
 
   /* --------------------------------- race state -------------------------------- */
 
@@ -229,13 +201,12 @@ export async function createSketch(
 
     const contentW = chrome.contentWidth(app.screen.width);
     const contentH = chrome.contentHeight(app.screen.height);
-    const streamH = params.stream ? Math.min(150, contentH * 0.22) : 0;
 
     // Chart frame.
     const chartTop = 120;
     const chartLeft = 24;
     const chartRight = contentW - 96;
-    const chartBottom = contentH - streamH - 28;
+    const chartBottom = contentH - 28;
     const chartW = Math.max(120, chartRight - chartLeft);
 
     /* ----- standings ----- */
@@ -243,7 +214,9 @@ export async function createSketch(
     const leader = top[0]?.[1] ?? 1;
     axisMax += (niceCeil(leader) - axisMax) * Math.min(1, dtMs / 900);
 
-    const rowH = Math.min(46, (chartBottom - chartTop) / Math.max(4, top.length));
+    // Fill the chart height: rows divide the available space (no fixed cap),
+    // so bars span tall/square export frames instead of clustering at the top.
+    const rowH = (chartBottom - chartTop) / Math.max(4, top.length);
     const barH = rowH * 0.72;
 
     // Ensure bar objects exist for everyone on the podium.
@@ -341,72 +314,6 @@ export async function createSketch(
       );
     }
 
-    /* ----- draw: streamgraph (revealed to the playhead) ----- */
-    streamGfx.clear();
-    let si = 0;
-    if (params.stream && streamH > 0) {
-      const streamTop = contentH - streamH - 8;
-      const playedBuckets = Math.max(1, Math.floor(player.progress * BUCKETS));
-      const bw = contentW / BUCKETS;
-      // Stacked bands, bottom-up.
-      const baseline = new Array<number>(playedBuckets).fill(contentH - 8);
-      for (let c = 0; c < clusterCount; c++) {
-        const row = streamData[c];
-        if (!row) continue;
-        const color = STREAM_COLORS[c % STREAM_COLORS.length] ?? ACCENT;
-        const tops: number[] = [];
-        for (let b = 0; b < playedBuckets; b++) {
-          const h = ((row[b] ?? 0) / maxColumn) * streamH;
-          tops.push((baseline[b] ?? 0) - h);
-        }
-        streamGfx.moveTo(0, baseline[0] ?? 0);
-        for (let b = 0; b < playedBuckets; b++) {
-          streamGfx.lineTo(b * bw + bw / 2, tops[b] ?? 0);
-        }
-        streamGfx.lineTo((playedBuckets - 1) * bw + bw / 2, baseline[playedBuckets - 1] ?? 0);
-        for (let b = playedBuckets - 1; b >= 0; b--) {
-          streamGfx.lineTo(b * bw + bw / 2, baseline[b] ?? 0);
-        }
-        streamGfx.closePath();
-        streamGfx.fill({ color, alpha: 0.55 });
-        for (let b = 0; b < playedBuckets; b++) baseline[b] = tops[b] ?? 0;
-
-        // Label the band at the playhead if it's thick enough there.
-        const lastTop = tops[playedBuckets - 1] ?? 0;
-        const lastBase = c === 0 ? contentH - 8 : (baseline[playedBuckets - 1] ?? 0) + 0; // baseline already updated
-        const thickness = Math.abs((c === 0 ? contentH - 8 : lastBase) - lastTop);
-        if (thickness > 14 && si < 6) {
-          let label = streamLabels[si];
-          if (!label) {
-            label = new Text({
-              text: "",
-              style: { fontFamily: "monospace", fontSize: 10, fill: INK },
-            });
-            label.anchor.set(1, 0.5);
-            labelLayer.addChild(label);
-            streamLabels.push(label);
-          }
-          label.visible = true;
-          label.alpha = 0.8;
-          label.text = `${history.clusterNames[c] ?? "?"}/`;
-          label.position.set(
-            Math.min((playedBuckets - 1) * bw + bw / 2 - 4, contentW - 8),
-            lastTop + thickness / 2,
-          );
-          si++;
-        }
-      }
-      // Divider.
-      streamGfx
-        .moveTo(0, streamTop - 2)
-        .lineTo(contentW, streamTop - 2)
-        .stroke({ color: INK, alpha: 0.1, width: 1 });
-    }
-    for (let i = si; i < streamLabels.length; i++) {
-      const label = streamLabels[i];
-      if (label) label.visible = false;
-    }
-
     /* ----- hover ----- */
     let tipMsg: string | null = null;
     if (pointerX > -999 && pointerX < contentW) {
@@ -442,6 +349,13 @@ export async function createSketch(
       boot.destroy();
     },
     transport,
+    capture: makeCaptureHandle(app, {
+      title: repoName,
+      history: history,
+      accent: ACCENT,
+      setChromeHidden: (b) => chrome.setHidden(b),
+      setHudVisible: (b) => hud.setVisible(b),
+    }),
     controls: [
       {
         key: "bars",
@@ -465,15 +379,6 @@ export async function createSketch(
         value: 1,
         set: (v) => {
           params.snappiness = v as number;
-        },
-      },
-      {
-        key: "stream",
-        label: "directory streamgraph",
-        kind: "toggle",
-        value: true,
-        set: (v) => {
-          params.stream = v as boolean;
         },
       },
     ],

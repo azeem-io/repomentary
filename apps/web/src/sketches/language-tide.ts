@@ -16,6 +16,7 @@ import {
   bootPixi,
   clamp01,
   consumePendingSeek,
+  makeCaptureHandle,
   requestRebuildSeek,
   type SketchInstance,
   type Transport,
@@ -528,14 +529,26 @@ export async function createSketch(
       boot.destroy();
     },
     transport,
+    capture: makeCaptureHandle(app, {
+      title: real.repo,
+      history: real.chromeHistory,
+      accent: 0xf7df5e,
+      setChromeHidden: (b) => chrome.setHidden(b),
+      setHudVisible: (b) => hud.setVisible(b),
+      setLabels: (b) => {
+        labelsOn = b;
+      },
+    }),
     controls: [
       {
         key: "mode",
-        label: "split: 0 lang · 1 dir · 2 author (G)",
-        kind: "range",
-        min: 0,
-        max: 2,
-        step: 1,
+        label: "split by (also G)",
+        kind: "enum",
+        options: [
+          { label: "language", value: 0 },
+          { label: "directory", value: 1 },
+          { label: "author", value: 2 },
+        ],
         value: 0,
         set: (v) => {
           params.mode = v as number;

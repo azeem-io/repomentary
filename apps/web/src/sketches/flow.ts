@@ -29,6 +29,7 @@ import {
   clamp01,
   consumePendingSeek,
   FrameGovernor,
+  makeCaptureHandle,
   makeGlowTexture,
   requestRebuildSeek,
   type SketchInstance,
@@ -556,7 +557,17 @@ export async function createSketch(
 
     const target = Math.floor(MAX * governor.scale);
     while (particles.length < target) {
-      const pr: Particle = { x: 0, y: 0, px: 0, py: 0, age: 0, life: 0, color: 0xffffff, speed: 1, heat: 0 };
+      const pr: Particle = {
+        x: 0,
+        y: 0,
+        px: 0,
+        py: 0,
+        age: 0,
+        life: 0,
+        color: 0xffffff,
+        speed: 1,
+        heat: 0,
+      };
       spawn(pr, progress);
       particles.push(pr);
     }
@@ -702,6 +713,16 @@ export async function createSketch(
       boot.destroy();
     },
     transport,
+    capture: makeCaptureHandle(app, {
+      title: real.repo,
+      history: real.chromeHistory,
+      accent: langColor(dominant),
+      setChromeHidden: (b) => chrome.setHidden(b),
+      setHudVisible: (b) => hud.setVisible(b),
+      setLabels: (b) => {
+        labelsOn = b;
+      },
+    }),
     controls: [
       {
         key: "labels",

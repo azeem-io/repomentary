@@ -1,9 +1,10 @@
 /**
- * Planet sketch, flat orrery style. The repo is a disc divided into
- * territories, one per top-level directory, sized by their share of commits.
- * Files are dots that light up when touched. Branches orbit on drawn rings
- * and spiral in when merged. Contributors are moons, releases add permanent
- * rings, big commits arrive as comets.
+ * Planet sketch. The planet's surface is a country MAP: a capacity-constrained
+ * weighted-Voronoi tessellation where each top-level directory owns a territory
+ * sized by its share of commits, sharing borders with its neighbours and
+ * filling the whole disc. Files are city-lights that flare on their territory
+ * when touched. Branches spiral in and crash onto their directory when merged,
+ * contributors are moons trailing short arcs, releases add rings.
  *
  * Hover anything for details. T toggles labels.
  */
@@ -19,6 +20,7 @@ import {
   easeOutBack,
   easeOutCubic,
   FrameGovernor,
+  makeCaptureHandle,
   makeDotTexture,
   makeGlowTexture,
   makeRingTexture,
@@ -28,17 +30,25 @@ import {
 
 const VOID = "#07091a";
 const CORE_COLOR = 0x14122e;
-const RIM_COLOR = 0xe8ecff;
 const RING_TINT = 0xc9b08f;
 const EMBER = 0xffb454;
-const MOON_TINT = 0xc9d4ff;
 const LABEL_COLOR = 0xc9d4ff;
 
+// Golden angle → sunflower (phyllotaxis) packing for a balanced island layout.
+const GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5));
+const MAP_RES = 300; // country-map raster resolution
+
 /** Bright territory palette; muted variants are derived. */
-const SECTOR_COLORS = [
-  0x6d5dfc, 0x4ecdc4, 0xffa3c2, 0xffd28f, 0x8fd0ff, 0xa5ffd0, 0xc2a8ff, 0xff8f70, 0xb8e986,
-  0x7ea6ff,
-];
+/** Distinct pastel per index via golden-angle hue (works for any count). */
+function hslToInt(h: number, sat: number, l: number): number {
+  const hh = (((h % 360) + 360) % 360) / 360;
+  const a = sat * Math.min(l, 1 - l);
+  const f = (n: number): number => {
+    const k = (n + hh * 12) % 12;
+    return l - a * Math.max(-1, Math.min(k - 3, Math.min(9 - k, 1)));
+  };
+  return (Math.round(f(0) * 255) << 16) | (Math.round(f(8) * 255) << 8) | Math.round(f(4) * 255);
+}
 
 const FILE_BASES = [
   "index",
@@ -69,9 +79,12 @@ const radiusOf = (mass: number): number => MASS_TO_R * Math.sqrt(mass);
 
 interface FileDot {
   name: string;
-  /** Polar position inside the territory (fractions, stable across growth). */
-  angleFrac: number;
-  radFrac: number;
+  /** Offset within the island (unit disc), stable across growth. */
+  ox: number;
+  oy: number;
+  /** World position, recomputed each frame (for comets + hover). */
+  x: number;
+  y: number;
   changes: number;
   ignite: number;
   sprite: Sprite;
@@ -89,9 +102,20 @@ interface SectorState {
   darken: number;
   files: FileDot[];
   label: Text;
-  /** Current angular bounds (recomputed every frame). */
-  a0: number;
-  a1: number;
+  key: string;
+  slot: number;
+  /** Country: fixed normalized seed, cell centroid, world pos, colour bytes. */
+  nx: number;
+  ny: number;
+  cnx: number;
+  cny: number;
+  cx: number;
+  cy: number;
+  r: number;
+  g: number;
+  b: number;
+  pw: number;
+  areaFrac: number;
 }
 
 interface BranchPlanet {
@@ -154,8 +178,9 @@ interface Comet {
   head: Sprite;
   fromX: number;
   fromY: number;
-  cluster: number;
-  fileIndex: number;
+  tx: number;
+  ty: number;
+  key: string;
   age: number;
   dur: number;
   magnitude: number;
@@ -205,17 +230,19 @@ function roman(n: number): string {
   return out;
 }
 
-/** Flat disc with a crisp (lightly antialiased) edge, branch planets. */
-function makeDiscTexture(size = 128): Texture {
+/** Soft atmospheric halo ring that hugs the sphere's limb (additive). */
+function makeAtmosphereTexture(size = 256): Texture {
   const canvas = document.createElement("canvas");
   canvas.width = size;
   canvas.height = size;
   const ctx = canvas.getContext("2d");
   if (ctx) {
     const r = size / 2;
-    const g = ctx.createRadialGradient(r, r, 0, r, r, r);
-    g.addColorStop(0, "rgba(255,255,255,1)");
-    g.addColorStop(0.94, "rgba(255,255,255,1)");
+    const g = ctx.createRadialGradient(r, r, r * 0.5, r, r, r);
+    g.addColorStop(0, "rgba(255,255,255,0)");
+    g.addColorStop(0.72, "rgba(255,255,255,0)");
+    g.addColorStop(0.86, "rgba(255,255,255,0.5)");
+    g.addColorStop(0.95, "rgba(255,255,255,0.14)");
     g.addColorStop(1, "rgba(255,255,255,0)");
     ctx.fillStyle = g;
     ctx.fillRect(0, 0, size, size);
@@ -246,9 +273,9 @@ export async function createSketch(
   const glowTex = makeGlowTexture(64);
   const dotTex = makeDotTexture(16);
   const ringTex = makeRingTexture(128);
-  const discTex = makeDiscTexture(128);
+  const atmoTex = makeAtmosphereTexture(256);
 
-  const params = { rotation: 1, mergeSize: 1, cometAt: 0.72, dots: 1, shakeAmp: 1 };
+  const params = { cometAt: 0.9, dots: 1, shakeAmp: 0.22 };
   const governor = new FrameGovernor();
   const shake = new CameraShake();
   const toastsTop = new Toasts(ui, "top", { fill: 0xffe9c2, fontSize: 16 });
@@ -272,13 +299,33 @@ export async function createSketch(
   const bodyLayer = new Container(); // branch discs + moons
   const fxLayer = new Container(); // debris, shockwaves, comets
   const labelLayer = new Container(); // sector/branch/moon labels (world space)
+  const atmo = new Sprite(atmoTex); // glowing atmospheric limb
+  atmo.anchor.set(0.5);
+  atmo.blendMode = "add";
+  atmo.tint = 0x9ab4ff;
+  // Country map: a weighted-Voronoi (power diagram) rasterised each ~90ms. The
+  // whole disc is tiled into connected regions (one per directory) that share
+  // borders and grow with commit share — one landmass, no gaps, no floating.
+  const mapCanvas = document.createElement("canvas");
+  mapCanvas.width = MAP_RES;
+  mapCanvas.height = MAP_RES;
+  const mapCtx = mapCanvas.getContext("2d");
+  const mapImg = mapCtx ? mapCtx.createImageData(MAP_RES, MAP_RES) : null;
+  const mapOwner = new Uint8Array(MAP_RES * MAP_RES);
+  const mapTex = Texture.from(mapCanvas);
+  mapTex.source.scaleMode = "linear"; // smooth the upscale (no pixelated borders)
+  const mapSprite = new Sprite(mapTex);
+  mapSprite.anchor.set(0.5);
+  let mapAccum = 999;
   world.addChild(
     bgLayer,
     orbitGfx,
     releaseGfx,
     trailGfx,
+    mapSprite,
     sectorGfx,
     fileLayer,
+    atmo,
     bodyLayer,
     fxLayer,
     labelLayer,
@@ -317,10 +364,10 @@ export async function createSketch(
 
   let labelsOn = true;
 
-  const makeLabel = (size: number, alpha = 0.85): Text => {
+  const makeLabel = (size: number, alpha = 0.85, fill: number = LABEL_COLOR): Text => {
     const t = new Text({
       text: "",
-      style: { fontFamily: "monospace", fontSize: size, fill: LABEL_COLOR, align: "center" },
+      style: { fontFamily: "monospace", fontSize: size, fill, align: "center" },
     });
     t.anchor.set(0.5);
     t.alpha = 0;
@@ -394,32 +441,103 @@ export async function createSketch(
   const impactWave = { age: 99999, angle: 0 };
   let displayR = radiusOf(mass);
   let growthPulse = 0;
-  let rotation = 0;
   const era = 1;
 
-  // Organic rim: shared wobble so territory edges meet a continuous coastline.
-  const w1 = rng() * Math.PI * 2;
-  const w2 = rng() * Math.PI * 2;
-  const rimAt = (theta: number, R: number): number =>
-    R * (1 + 0.05 * Math.sin(3 * theta + w1) + 0.032 * Math.sin(7 * theta + w2));
+  const shortName = (n: string): string => {
+    const parts = n.split(" ");
+    return parts.length > 1 ? `${parts[0]} ${(parts[1] ?? "").charAt(0)}.` : n.slice(0, 14);
+  };
+  const extOf = (path?: string): string => {
+    if (!path) return "·other";
+    const slash = path.lastIndexOf("/");
+    const dot = path.lastIndexOf(".");
+    return dot > slash + 1 ? path.slice(dot) : "·other";
+  };
 
-  const sectors: SectorState[] = history.clusterNames.map((name, i) => {
-    const bright = SECTOR_COLORS[i % SECTOR_COLORS.length] ?? 0x6d5dfc;
+  const keyOf = (mode: number, e: RepoEvent): string => {
+    if (mode === 1) return history.authors[e.author] ?? "anon";
+    if (mode === 2) return extOf(e.path);
+    return history.clusterNames[e.cluster % Math.max(1, history.clusterNames.length)] ?? "·root";
+  };
+  const labelOf = (mode: number, key: string): string => (mode === 1 ? shortName(key) : key);
+  const hashStr = (str: string): number => {
+    let h = 2166136261;
+    for (let i = 0; i < str.length; i++) {
+      h ^= str.charCodeAt(i);
+      h = Math.imul(h, 16777619);
+    }
+    return h >>> 0;
+  };
+
+  // The SHOWN territories are the LIVE top-N by commits-so-far (like Race): a key
+  // earns a country only once it breaks into the current top, and loses it when
+  // overtaken. `tally` = cumulative commit weight per key up to the playhead.
+  let topCount = 14;
+  let groupMode = 0;
+  const tally = new Map<string, number>();
+  const sectorByKey = new Map<string, SectorState>();
+  let slots: (string | null)[] = new Array(topCount).fill(null);
+  let sectors: SectorState[] = [];
+
+  const seedFor = (slot: number): [number, number] => {
+    const n = Math.max(1, slots.length);
+    const sr = 0.62 * Math.sqrt((slot + 0.5) / n);
+    return [sr * Math.cos(slot * GOLDEN_ANGLE), sr * Math.sin(slot * GOLDEN_ANGLE)];
+  };
+  const mkSector = (key: string, slot: number): SectorState => {
+    const bright = hslToInt(hashStr(key) % 360, 0.6, 0.66);
+    const [nx, ny] = seedFor(slot);
     return {
-      name,
+      name: labelOf(groupMode, key),
+      key,
+      slot,
       bright,
       muted: mixColor(bright, CORE_COLOR, 0.5),
-      weight: 1,
-      share: 1 / history.clusters,
+      weight: tally.get(key) ?? 1,
+      share: 1 / Math.max(1, topCount),
       commits: 0,
       flash: 0,
       darken: 0,
       files: [],
-      label: makeLabel(13, 0.8),
-      a0: 0,
-      a1: 0,
+      label: makeLabel(15, 0.95, 0x0b0f1c),
+      nx,
+      ny,
+      cnx: nx,
+      cny: ny,
+      cx: 0,
+      cy: 0,
+      r: (bright >> 16) & 0xff,
+      g: (bright >> 8) & 0xff,
+      b: bright & 0xff,
+      pw: 0,
+      areaFrac: 0,
     };
-  });
+  };
+  const dropSector = (sec: SectorState): void => {
+    sec.label.destroy();
+    for (const f of sec.files) f.sprite.destroy();
+    slots[sec.slot] = null;
+    sectorByKey.delete(sec.key);
+  };
+  // Reconcile the shown set to the live top-N by tally (hysteresis avoids flicker).
+  const reconcile = (): void => {
+    const ranked = [...tally.entries()].sort((a, b) => b[1] - a[1]).map(([k]) => k);
+    const want = new Set(ranked.slice(0, topCount));
+    const keepBand = new Set(ranked.slice(0, topCount + 3));
+    for (const [k, sec] of [...sectorByKey]) {
+      if (!keepBand.has(k)) dropSector(sec);
+    }
+    for (const k of ranked) {
+      if (sectorByKey.size >= topCount) break;
+      if (sectorByKey.has(k) || !want.has(k)) continue;
+      const slot = slots.indexOf(null);
+      if (slot === -1) break;
+      slots[slot] = k;
+      sectorByKey.set(k, mkSector(k, slot));
+    }
+    for (const [k, sec] of sectorByKey) sec.weight = tally.get(k) ?? 1;
+    sectors = [...sectorByKey.values()];
+  };
 
   const usedFileNames = new Set<string>();
   const fileBudgetPerSector = () => Math.round(22 * governor.scale) + 4;
@@ -437,9 +555,7 @@ export async function createSketch(
     return `${sector.name}/mod${Math.floor(rng() * 999)}.ts`;
   };
 
-  const igniteFile = (cluster: number, magnitude: number): FileDot | null => {
-    const sector = sectors[cluster % sectors.length];
-    if (!sector) return null;
+  const igniteFile = (sector: SectorState, magnitude: number): FileDot | null => {
     let file: FileDot | undefined;
     const reuseExisting = sector.files.length > 0 && rng() < 0.6;
     if (reuseExisting || sector.files.length >= fileBudgetPerSector()) {
@@ -450,10 +566,14 @@ export async function createSketch(
       sprite.anchor.set(0.5);
       sprite.tint = sector.bright;
       fileLayer.addChild(sprite);
+      const fa = rng() * Math.PI * 2;
+      const fr = Math.sqrt(rng()) * 0.82; // uniform inside the coast
       file = {
         name: makeFileName(sector),
-        angleFrac: 0.12 + rng() * 0.76,
-        radFrac: 0.3 + rng() * 0.58,
+        ox: Math.cos(fa) * fr,
+        oy: Math.sin(fa) * fr,
+        x: 0,
+        y: 0,
         changes: 0,
         ignite: 0,
         sprite,
@@ -533,43 +653,6 @@ export async function createSketch(
     s.sprite.tint = tint;
   };
 
-  const spawnBranch = (id: number, cluster: number, name: string) => {
-    let slot = branchSlots.findIndex((used) => !used);
-    if (slot === -1) slot = 0;
-    branchSlots[slot] = true;
-    const sector = sectors[cluster % sectors.length];
-    const tint = sector ? sector.bright : 0x8fd0ff;
-
-    const disc = new Sprite(discTex);
-    disc.anchor.set(0.5);
-    disc.tint = mixColor(tint, CORE_COLOR, 0.25);
-    bodyLayer.addChild(disc);
-
-    branches.push({
-      id,
-      name,
-      cluster,
-      disc,
-      label: makeLabel(12, 0.9),
-      mass: 6,
-      commits: 0,
-      orbitAngle: rng() * Math.PI * 2,
-      orbitSpeed: (0.00026 + rng() * 0.0002) * (reducedMotion ? 0.5 : 1),
-      slot,
-      tint,
-      state: "spawning",
-      stateAge: 0,
-      autoInfallAt: null,
-      infallFromR: 0,
-      pulse: 0,
-      trail: [],
-      trailCarry: 0,
-      x: 0,
-      y: 0,
-      r: radiusOf(6),
-    });
-  };
-
   const orbitRadiusFor = (slot: number): number => displayR * 1.85 + 52 + slot * 56;
 
   const absorbBranch = (b: BranchPlanet) => {
@@ -581,19 +664,17 @@ export async function createSketch(
       sector.commits += b.commits;
     }
     if (!reducedMotion) {
-      shake.kick(0.22 + Math.min(0.6, b.mass / 34));
+      shake.kick(0.03 + Math.min(0.06, b.mass / 320));
       zoomKick = Math.min(0.12, zoomKick + 0.05 + b.mass * 0.0012);
       impactWave.age = 0;
       impactWave.angle = Math.atan2(b.y, b.x);
-      burst(b.x, b.y, Math.round(16 + b.mass * 1.4), b.tint, 0.3, true);
-      burst(b.x, b.y, 12, EMBER, 0.22, true);
-      shockwave(b.x, b.y, 2 + b.r / 26, 850, b.tint);
-      shockwave(0, 0, 3 + displayR / 34, 1200, 0xffffff);
+      burst(b.x, b.y, Math.round(6 + b.mass * 0.5), b.tint, 0.16, true);
+      shockwave(b.x, b.y, 1.3 + b.r / 44, 850, b.tint);
     } else {
-      shockwave(0, 0, 2.4, 1400, b.tint);
+      shockwave(b.x, b.y, 1.2, 1200, b.tint);
     }
     const ignitions = Math.min(14, Math.max(3, Math.round(b.commits * 0.8)));
-    for (let i = 0; i < ignitions; i++) igniteFile(b.cluster, 0.5);
+    for (let i = 0; i < ignitions && sector; i++) igniteFile(sector, 0.5);
     growthPulse = 1;
     branchSlots[b.slot] = false;
     b.disc.destroy();
@@ -601,20 +682,16 @@ export async function createSketch(
     branches.splice(branches.indexOf(b), 1);
   };
 
-  const biteSector = (cluster: number, magnitude: number) => {
-    const sector = sectors[cluster % sectors.length];
-    if (!sector) return;
+  const biteSector = (sector: SectorState, magnitude: number) => {
     const lost = Math.min(mass - 14, mass * (0.05 + magnitude * 0.09));
     if (lost > 0) mass -= lost;
-    sector.weight = Math.max(0.4, sector.weight * (1 - 0.35 * magnitude));
     sector.darken = 1;
-    const mid = (sector.a0 + sector.a1) / 2;
-    const x = Math.cos(mid) * displayR;
-    const y = Math.sin(mid) * displayR;
+    const x = sector.cx;
+    const y = sector.cy;
     if (!reducedMotion) {
-      shake.kick(0.18 + magnitude * 0.38);
+      shake.kick(0.04 + magnitude * 0.1);
       burst(x, y, Math.round(18 + magnitude * 26), EMBER, 0.32);
-      shockwave(x, y, 1.8 + magnitude * 1.8, 800, EMBER);
+      shockwave(x, y, 0.9 + magnitude * 0.9, 800, EMBER);
     }
     const drop = Math.round(magnitude * 4);
     for (let i = 0; i < drop && sector.files.length > 1; i++) {
@@ -624,12 +701,12 @@ export async function createSketch(
     }
   };
 
-  const launchComet = (cluster: number, magnitude: number) => {
-    const file = igniteFile(cluster, magnitude);
-    if (!file || reducedMotion) return;
-    const sector = sectors[cluster % sectors.length];
-    if (!sector) return;
-    const fileIndex = sector.files.indexOf(file);
+  const launchComet = (sector: SectorState, magnitude: number) => {
+    const file = igniteFile(sector, magnitude);
+    if (reducedMotion) return;
+    const spread = displayR * (0.05 + 0.4 * Math.sqrt(Math.max(0, sector.share)));
+    const tx = sector.cx + (file ? file.ox * spread : 0);
+    const ty = sector.cy + (file ? file.oy * spread : 0);
     const side = rng() * Math.PI * 2;
     const dist = Math.max(app.screen.width, app.screen.height) * 0.75;
     const head = new Sprite(glowTex);
@@ -642,8 +719,9 @@ export async function createSketch(
       head,
       fromX: Math.cos(side) * dist,
       fromY: Math.sin(side) * dist,
-      cluster,
-      fileIndex,
+      tx,
+      ty,
+      key: sector.key,
       age: 0,
       dur: 800 - magnitude * 250,
       magnitude,
@@ -676,90 +754,83 @@ export async function createSketch(
     switch (e.kind) {
       case "commit": {
         const weightGain = 0.5 + e.magnitude * 1.4;
-        const branch = e.branch ? branches.find((x) => x.id === e.branch) : undefined;
-        if (branch) {
-          branch.mass += weightGain;
-          branch.commits++;
-          branch.pulse = 1;
-        } else {
-          mass += weightGain;
-          const sector = sectors[e.cluster % sectors.length];
-          if (sector) {
-            sector.weight += weightGain;
-            sector.commits++;
-          }
-          if (e.magnitude > params.cometAt) launchComet(e.cluster, e.magnitude);
-          else igniteFile(e.cluster, e.magnitude);
+        mass += weightGain;
+        const k = keyOf(groupMode, e);
+        tally.set(k, (tally.get(k) ?? 0) + weightGain);
+        const sector = sectorByKey.get(k);
+        if (sector) {
+          sector.commits++;
+          if (e.magnitude > params.cometAt) launchComet(sector, e.magnitude);
+          else igniteFile(sector, e.magnitude);
         }
-        const moon = moons.find((m) => m.author === e.author);
-        if (moon) moon.commits++;
         break;
       }
-      case "branchStart":
-        if (e.branch) spawnBranch(e.branch, e.cluster, e.label ?? `branch-${e.branch}`);
-        break;
       case "merge": {
-        const branch = branches.find((x) => x.id === e.branch);
-        if (branch && branch.state !== "infall") {
-          branch.state = "infall";
-          branch.stateAge = 0;
-          branch.infallFromR = orbitRadiusFor(branch.slot);
-        } else if (branches.length < 3) {
-          // Real merge with no tracked branch lifecycle: a planet swings by
-          // and is absorbed. Sized relative to the world so it stays visible.
-          spawnBranch(9000 + Math.floor(rng() * 8999), e.cluster, e.label ?? "merge");
-          const spawned = branches[branches.length - 1];
-          if (spawned) {
-            spawned.mass = Math.max(5 + e.magnitude * 16, mass * 0.05 * params.mergeSize);
-            spawned.commits = 1 + Math.round(e.magnitude * 9);
-            spawned.autoInfallAt = 2400 + rng() * 2200;
-          }
-        } else {
-          mass += 2 + e.magnitude * 6;
-          const sector = sectors[e.cluster % sectors.length];
-          if (sector) {
-            sector.weight += 2 + e.magnitude * 5;
-            sector.flash = 1;
-          }
-          growthPulse = 1;
+        // A PR merge streaks in as an asteroid and crashes into its territory.
+        mass += 2 + e.magnitude * 6;
+        growthPulse = 1;
+        const k = keyOf(groupMode, e);
+        tally.set(k, (tally.get(k) ?? 0) + (2 + e.magnitude * 5));
+        const sector = sectorByKey.get(k);
+        if (sector) {
+          sector.flash = 1;
+          launchComet(sector, Math.max(e.magnitude, 0.55));
         }
         break;
       }
-      case "massDelete":
-        biteSector(e.cluster, e.magnitude);
+      case "massDelete": {
+        const k = keyOf(groupMode, e);
+        const cur = tally.get(k) ?? 0;
+        tally.set(k, Math.max(0, cur - cur * 0.3 * e.magnitude));
+        const sector = sectorByKey.get(k);
+        if (sector) biteSector(sector, e.magnitude);
         break;
+      }
       case "release":
         releaseFactors.push(1.42 + releaseFactors.length * 0.16);
         ringBirth = 0;
         growthPulse = 1;
         break;
-      case "newContributor": {
-        if (moons.length < 12) {
-          const sprite = new Sprite(dotTex);
-          sprite.anchor.set(0.5);
-          sprite.tint = MOON_TINT;
-          bodyLayer.addChild(sprite);
-          moons.push({
-            name: e.label ?? "someone",
-            author: e.author,
-            commits: 1,
-            angle: rng() * Math.PI * 2,
-            speed: (0.0001 + rng() * 0.00018) * (rng() < 0.5 ? 1 : -1),
-            slot: moons.length,
-            sprite,
-            label: makeLabel(10, 0.55),
-            x: 0,
-            y: 0,
-          });
-        }
-        if (e.label) toastsBottom.announce(`✦ ${e.label} joined`, 2200);
-        break;
-      }
     }
   };
 
   const player = new EventPlayer(history, history.duration / 110);
   const transport = player.transport();
+
+  // Rebuild the tally for a grouping by replaying commits up to the playhead,
+  // then reconcile the shown top-N.
+  const resetGrouping = (mode: number): void => {
+    for (const sec of sectorByKey.values()) {
+      sec.label.destroy();
+      for (const f of sec.files) f.sprite.destroy();
+    }
+    sectorByKey.clear();
+    slots = new Array(topCount).fill(null);
+    groupMode = mode;
+    tally.clear();
+    const now = player.progress * history.duration;
+    for (const e of history.events) {
+      if (e.t > now) break;
+      const k = keyOf(mode, e);
+      if (e.kind === "commit") tally.set(k, (tally.get(k) ?? 0) + (0.5 + e.magnitude * 1.4));
+      else if (e.kind === "merge") tally.set(k, (tally.get(k) ?? 0) + (2 + e.magnitude * 5));
+    }
+    reconcile();
+  };
+  const switchMode = (m: number): void => {
+    if (m === groupMode) return;
+    resetGrouping(m);
+  };
+  const setTopCount = (n: number): void => {
+    topCount = Math.max(4, Math.round(n));
+    for (const sec of sectorByKey.values()) {
+      sec.label.destroy();
+      for (const f of sec.files) f.sprite.destroy();
+    }
+    sectorByKey.clear();
+    slots = new Array(topCount).fill(null);
+    reconcile();
+  };
 
   /* ------------------------------- interaction ------------------------------ */
 
@@ -785,15 +856,21 @@ export async function createSketch(
   });
 
   const sectorAtWorld = (wx: number, wy: number): SectorState | null => {
-    const theta = Math.atan2(wy, wx);
-    const d = Math.hypot(wx, wy);
+    const nx = wx / displayR;
+    const ny = wy / displayR;
+    if (nx * nx + ny * ny > 0.94) return null;
+    let best: SectorState | null = null;
+    let bestV = Number.POSITIVE_INFINITY;
     for (const s of sectors) {
-      // a0/a1 are continuous ascending; normalize theta into [a0, a0+2π)
-      let t = theta;
-      while (t < s.a0) t += Math.PI * 2;
-      if (t <= s.a1 && d <= rimAt(t, displayR) * 1.02) return s;
+      const dx = nx - s.nx;
+      const dy = ny - s.ny;
+      const v = dx * dx + dy * dy - s.pw;
+      if (v < bestV) {
+        bestV = v;
+        best = s;
+      }
     }
-    return null;
+    return best;
   };
 
   const onTap = (event: { global: { x: number; y: number } }) => {
@@ -810,18 +887,19 @@ export async function createSketch(
     // Click the planet → commit shower in that territory.
     const sector = sectorAtWorld(wx, wy);
     if (sector) {
-      const cluster = sectors.indexOf(sector);
+      const k = sector.key;
       for (let i = 0; i < 4; i++) {
         mass += 0.7;
-        sector.weight += 0.9;
+        tally.set(k, (tally.get(k) ?? 0) + 0.9);
         sector.commits++;
-        igniteFile(cluster, 0.4 + rng() * 0.5);
+        igniteFile(sector, 0.4 + rng() * 0.5);
       }
       if (!reducedMotion) burst(wx, wy, 10, sector.bright, 0.16);
       return;
     }
-    // Click the void → a comet finds a random territory.
-    launchComet(Math.floor(rng() * sectors.length), 0.8);
+    // Click the void → an asteroid finds a random live territory.
+    const rs = sectors[Math.floor(rng() * sectors.length)];
+    if (rs) launchComet(rs, 0.8);
   };
   app.stage.on("pointertap", onTap);
 
@@ -829,27 +907,13 @@ export async function createSketch(
     if (ev.code === "KeyT") {
       labelsOn = !labelsOn;
       syncChip();
+    } else if (ev.code === "KeyG") {
+      switchMode((groupMode + 1) % 3);
     } else if (ev.code === "Space") {
       ev.preventDefault();
-      const ripest = [...branches]
-        .filter((b) => b.state === "orbiting")
-        .sort((a, b) => b.mass - a.mass)[0];
-      if (ripest) {
-        ripest.state = "infall";
-        ripest.stateAge = 0;
-        ripest.infallFromR = orbitRadiusFor(ripest.slot);
-      } else {
-        spawnBranch(
-          900 + Math.floor(rng() * 99),
-          Math.floor(rng() * sectors.length),
-          "feat/surprise",
-        );
-        const b = branches[branches.length - 1];
-        if (b) {
-          b.mass = 10 + rng() * 12;
-          b.commits = 6;
-        }
-      }
+      // Fire a demo asteroid into a random live territory.
+      const rs = sectors[Math.floor(rng() * sectors.length)];
+      if (rs) launchComet(rs, 0.9);
     }
   };
   window.addEventListener("keydown", onKey);
@@ -863,94 +927,142 @@ export async function createSketch(
 
     if (governor.update(dtMs)) buildBackground();
     for (const e of player.update(dtMs)) onEvent(e);
+    reconcile();
 
     clockMs += dtMs;
     impactWave.age += dtMs;
     zoomKick = Math.max(0, zoomKick - dtMs * 0.00012);
     growthPulse = Math.max(0, growthPulse - dtMs / 900);
-    rotation += dtMs * (reducedMotion ? 0.000012 : 0.00003) * params.rotation;
     ringBirth += dtMs;
 
     const targetR = radiusOf(mass);
     displayR += (targetR - displayR) * Math.min(1, dtMs / 350);
     const R = displayR * (1 + growthPulse * 0.035);
 
-    halo.scale.set(R * 0.055);
-    halo.alpha = 0.15 + growthPulse * 0.14;
+    halo.scale.set(R * 0.02);
+    halo.alpha = 0.07 + growthPulse * 0.1;
 
     /* ----- territory shares (animated re-apportioning) ----- */
-    const totalWeight = sectors.reduce((acc, s) => acc + s.weight, 0);
-    let cursor = rotation;
+    const totalWeight = sectors.reduce((acc, s) => acc + s.weight, 0) || 1;
     for (const s of sectors) {
       const target = s.weight / totalWeight;
       s.share += (target - s.share) * Math.min(1, dtMs / 1600);
     }
-    const shareSum = sectors.reduce((acc, s) => acc + s.share, 0);
-    for (const s of sectors) {
-      const span = (s.share / shareSum) * Math.PI * 2;
-      s.a0 = cursor;
-      s.a1 = cursor + span;
-      cursor += span;
-    }
 
-    /* ----- draw the planet ----- */
-    sectorGfx.clear();
-    const gap = 0.016;
+    /* ----- draw the planet (one landmass: a weighted-Voronoi country map) ----- */
+    atmo.scale.set((R * 1.12 * 2) / 256);
+    atmo.alpha = 0.34 + growthPulse * 0.5;
+    mapSprite.scale.set((R * 2) / MAP_RES); // normalized +/-1 -> +/-R
+
     for (const s of sectors) {
+      s.cx = s.cnx * R; // cell centroid in world space (labels / files / merge target)
+      s.cy = s.cny * R;
       s.flash = Math.max(0, s.flash - dtMs / 700);
-      s.darken = Math.max(0, s.darken - dtMs / 1100);
-      const a0 = s.a0 + gap;
-      const a1 = s.a1 - gap;
-      if (a1 <= a0) continue;
-      const steps = Math.max(6, Math.ceil((a1 - a0) / 0.09));
-      const coreR = R * 0.17;
-      let brightness = 0.18 + s.flash * 0.7;
-      const waveT = impactWave.age / 650;
-      if (waveT < 1) {
-        const mid = (s.a0 + s.a1) / 2;
-        let angDist = Math.abs(mid - impactWave.angle);
-        angDist = Math.min(angDist % (Math.PI * 2), Math.PI * 2 - (angDist % (Math.PI * 2)));
-        const front = waveT * Math.PI;
-        const proximity = Math.max(0, 1 - Math.abs(angDist - front) / 0.9);
-        brightness += proximity * (1 - waveT) * 0.55;
-      }
-      let color = mixColor(s.muted, s.bright, Math.min(1, brightness));
-      if (s.darken > 0) color = mixColor(color, 0x000000, s.darken * 0.45);
+    }
 
-      sectorGfx.moveTo(Math.cos(a0) * coreR, Math.sin(a0) * coreR);
-      for (let i = 0; i <= steps; i++) {
-        const t = a0 + ((a1 - a0) * i) / steps;
-        const r = rimAt(t, R);
-        sectorGfx.lineTo(Math.cos(t) * r, Math.sin(t) * r);
+    // Rasterise the power diagram a few times a second (cheap, decoupled from 60fps).
+    mapAccum += dtMs;
+    if (mapImg && mapCtx && mapAccum >= 90) {
+      mapAccum = 0;
+      const ns = sectors.length;
+      const SX = new Float64Array(ns);
+      const SY = new Float64Array(ns);
+      const W = new Float64Array(ns);
+      const CR = new Float64Array(ns);
+      const CG = new Float64Array(ns);
+      const CB = new Float64Array(ns);
+      const AX = new Float64Array(ns);
+      const AY = new Float64Array(ns);
+      const AN = new Float64Array(ns);
+      for (let i = 0; i < ns; i++) {
+        const s = sectors[i];
+        if (!s) continue;
+        SX[i] = s.nx;
+        SY[i] = s.ny;
+        W[i] = s.pw; // capacity-constrained weight (area converges to share)
+        const glow = 1 + s.flash * 0.45;
+        CR[i] = Math.min(255, s.r * glow);
+        CG[i] = Math.min(255, s.g * glow);
+        CB[i] = Math.min(255, s.b * glow);
       }
-      sectorGfx.lineTo(Math.cos(a1) * coreR, Math.sin(a1) * coreR);
-      sectorGfx.arc(0, 0, coreR, a1, a0, true);
-      sectorGfx.closePath();
-      sectorGfx.fill({ color, alpha: 0.96 });
-      if (s.flash > 0.15) {
-        // Hot coastline while the territory is excited.
-        for (let i = 0; i <= steps; i++) {
-          const t = a0 + ((a1 - a0) * i) / steps;
-          const r = rimAt(t, R) + 1;
-          if (i === 0) sectorGfx.moveTo(Math.cos(t) * r, Math.sin(t) * r);
-          else sectorGfx.lineTo(Math.cos(t) * r, Math.sin(t) * r);
+      const data = mapImg.data;
+      const owner = mapOwner;
+      const inv = 2 / MAP_RES;
+      const edge = 0.97 * 0.97;
+      for (let py = 0; py < MAP_RES; py++) {
+        const ny = (py + 0.5) * inv - 1;
+        for (let px = 0; px < MAP_RES; px++) {
+          const nx = (px + 0.5) * inv - 1;
+          const p = py * MAP_RES + px;
+          const idx = p * 4;
+          const rr = nx * nx + ny * ny;
+          if (rr > edge) {
+            data[idx + 3] = 0;
+            owner[p] = 255;
+            continue;
+          }
+          let best = 0;
+          let bestV = Number.POSITIVE_INFINITY;
+          for (let i = 0; i < ns; i++) {
+            const ddx = nx - (SX[i] ?? 0);
+            const ddy = ny - (SY[i] ?? 0);
+            const v = ddx * ddx + ddy * ddy - (W[i] ?? 0);
+            if (v < bestV) {
+              bestV = v;
+              best = i;
+            }
+          }
+          owner[p] = best;
+          AX[best] = (AX[best] ?? 0) + nx;
+          AY[best] = (AY[best] ?? 0) + ny;
+          AN[best] = (AN[best] ?? 0) + 1;
+          const shade = 0.74 + 0.26 * (1 - rr); // gentle roundness
+          data[idx] = (CR[best] ?? 0) * shade;
+          data[idx + 1] = (CG[best] ?? 0) * shade;
+          data[idx + 2] = (CB[best] ?? 0) * shade;
+          data[idx + 3] = 255;
         }
-        sectorGfx.stroke({ color: s.bright, alpha: s.flash * 0.55, width: 2 });
       }
+      // Country borders: darken where the owning directory changes.
+      for (let py = 1; py < MAP_RES; py++) {
+        for (let px = 1; px < MAP_RES; px++) {
+          const p = py * MAP_RES + px;
+          const o = owner[p];
+          if (o === 255) continue;
+          if (o !== owner[p - 1] || o !== owner[p - MAP_RES]) {
+            const idx = p * 4;
+            data[idx] = (data[idx] ?? 0) * 0.4;
+            data[idx + 1] = (data[idx + 1] ?? 0) * 0.4;
+            data[idx + 2] = (data[idx + 2] ?? 0) * 0.45;
+          }
+        }
+      }
+      let inside = 0;
+      for (let i = 0; i < ns; i++) inside += AN[i] ?? 0;
+      inside = inside || 1;
+      let totShare = 0;
+      for (const sc of sectors) totShare += sc.share;
+      totShare = totShare || 1;
+      let meanPw = 0;
+      for (let i = 0; i < ns; i++) {
+        const s = sectors[i];
+        if (!s) continue;
+        const c = AN[i] ?? 0;
+        s.areaFrac = c / inside;
+        // Capacity constraint: nudge weight so the painted area matches commit share.
+        s.pw += (s.share / totShare - s.areaFrac) * 0.6;
+        s.pw = Math.max(-1, Math.min(1, s.pw));
+        if (c > 0) {
+          s.cnx = (AX[i] ?? 0) / c;
+          s.cny = (AY[i] ?? 0) / c;
+        }
+        meanPw += s.pw;
+      }
+      meanPw /= ns || 1;
+      for (const sc of sectors) sc.pw -= meanPw; // only weight differences matter
+      mapCtx.putImageData(mapImg, 0, 0);
+      mapTex.source.update();
     }
-    // Molten core, the repo's heartbeat.
-    sectorGfx
-      .circle(0, 0, R * 0.155)
-      .fill({ color: mixColor(CORE_COLOR, 0xffffff, growthPulse * 0.5), alpha: 1 });
-    // Coastline.
-    const rimSteps = 90;
-    for (let i = 0; i <= rimSteps; i++) {
-      const t = (i / rimSteps) * Math.PI * 2;
-      const r = rimAt(t, R) + 2;
-      if (i === 0) sectorGfx.moveTo(Math.cos(t) * r, Math.sin(t) * r);
-      else sectorGfx.lineTo(Math.cos(t) * r, Math.sin(t) * r);
-    }
-    sectorGfx.stroke({ color: RIM_COLOR, alpha: 0.22, width: 2 });
 
     /* ----- release rings ----- */
     releaseGfx.clear();
@@ -961,22 +1073,22 @@ export async function createSketch(
       const rr = R * (1 + (factor - 1) * born);
       releaseGfx
         .circle(0, 0, rr)
-        .stroke({ color: RING_TINT, alpha: Math.max(0.07, 0.3 - i * 0.02) * born, width: 1.6 });
+        .stroke({ color: RING_TINT, alpha: Math.max(0.05, 0.18 - i * 0.015) * born, width: 1.4 });
     }
 
-    /* ----- file dots ----- */
+    /* ----- file city-lights within their country ----- */
     for (const s of sectors) {
-      const span = s.a1 - s.a0;
+      const spread = R * (0.05 + 0.4 * Math.sqrt(Math.max(0, s.share)));
       for (const f of s.files) {
         f.ignite = Math.max(0, f.ignite - dtMs / 1000);
-        const t = s.a0 + span * f.angleFrac;
-        const r = rimAt(t, R) * (0.22 + f.radFrac * 0.66);
-        f.sprite.position.set(Math.cos(t) * r, Math.sin(t) * r);
-        f.sprite.scale.set(0.16 + Math.min(0.2, f.changes * 0.014) + f.ignite * 0.3);
+        f.x = s.cx + f.ox * spread;
+        f.y = s.cy + f.oy * spread;
+        f.sprite.position.set(f.x, f.y);
+        f.sprite.scale.set(0.16 + Math.min(0.2, f.changes * 0.014) + f.ignite * 0.34);
         f.sprite.alpha =
-          (0.34 + 0.12 * Math.sin(clockMs * 0.002 + f.angleFrac * 6.28) + f.ignite * 0.6) *
-          params.dots;
-        f.sprite.tint = f.ignite > 0.4 ? 0xffffff : s.bright;
+          (0.42 + 0.14 * Math.sin(clockMs * 0.002 + f.ox * 6.28) + f.ignite * 0.45) * params.dots;
+        f.sprite.tint =
+          f.ignite > 0.55 ? mixColor(s.bright, 0xffffff, 0.7) : mixColor(s.bright, 0xffe6b0, 0.4);
       }
     }
 
@@ -989,14 +1101,27 @@ export async function createSketch(
       b.pulse = Math.max(0, b.pulse - dtMs / 500);
       const speedFactor = b.state === "infall" ? 2.6 : 1;
       b.orbitAngle += b.orbitSpeed * dtMs * speedFactor;
-      let orbitR = orbitRadiusFor(b.slot);
-      if (b.state === "infall") {
-        const k = clamp01(b.stateAge / 1500);
-        orbitR = b.infallFromR + (R - b.infallFromR) * (k * k * k);
-      }
+      const orbitR = orbitRadiusFor(b.slot);
       b.r = radiusOf(b.mass);
-      b.x = Math.cos(b.orbitAngle) * orbitR;
-      b.y = Math.sin(b.orbitAngle) * orbitR;
+      const infSec = sectors[b.cluster % sectors.length];
+      if (b.state === "infall") {
+        // Spiral gently inward and settle onto the directory's territory centre.
+        const tx = infSec ? infSec.cx : 0;
+        const ty = infSec ? infSec.cy : 0;
+        const curR = Math.hypot(b.x, b.y) || 1;
+        const curA = Math.atan2(b.y, b.x);
+        const tgtR = Math.hypot(tx, ty);
+        let dA = Math.atan2(ty, tx) - curA;
+        dA = Math.atan2(Math.sin(dA), Math.cos(dA)); // shortest turn
+        const k = Math.min(1, dtMs / 950);
+        const nr = curR + (tgtR - curR) * k;
+        const na = curA + dA * k * 0.6;
+        b.x = Math.cos(na) * nr;
+        b.y = Math.sin(na) * nr;
+      } else {
+        b.x = Math.cos(b.orbitAngle) * orbitR;
+        b.y = Math.sin(b.orbitAngle) * orbitR;
+      }
 
       const spawnK = b.state === "spawning" ? easeOutBack(clamp01(b.stateAge / 500)) : 1;
       if (b.state === "spawning" && b.stateAge > 500) b.state = "orbiting";
@@ -1007,7 +1132,7 @@ export async function createSketch(
       }
       b.disc.position.set(b.x, b.y);
       // Never smaller than ~9px on screen, however far the camera pulls back.
-      const renderBranchR = Math.max(b.r * (1 + b.pulse * 0.12), 9 / Math.max(0.12, zoom));
+      const renderBranchR = Math.max(b.r * 0.5 * (1 + b.pulse * 0.12), 6 / Math.max(0.12, zoom));
       b.disc.scale.set((renderBranchR * 2 * spawnK) / 128);
 
       // Motion trail.
@@ -1028,13 +1153,16 @@ export async function createSketch(
       if (b.state === "infall") {
         // Anticipation: a gravity tether reels it in; the disc strobes.
         const pullK = clamp01(b.stateAge / 1500);
-        trailGfx.moveTo(b.x, b.y).lineTo(0, 0);
-        trailGfx.stroke({ color: b.tint, alpha: 0.12 + pullK * 0.22, width: 1.5 });
         const strobe = 0.5 + 0.5 * Math.sin(b.stateAge * 0.02);
         b.disc.tint = mixColor(mixColor(b.tint, CORE_COLOR, 0.25), 0xffffff, strobe * 0.5 * pullK);
       }
 
-      if (b.state === "infall" && (Math.hypot(b.x, b.y) <= R + b.r * 0.4 || b.stateAge > 1600)) {
+      if (
+        b.state === "infall" &&
+        (Math.hypot(b.x - (infSec ? infSec.cx : 0), b.y - (infSec ? infSec.cy : 0)) <=
+          b.r + R * 0.1 ||
+          b.stateAge > 1600)
+      ) {
         absorbBranch(b);
       }
     }
@@ -1049,16 +1177,18 @@ export async function createSketch(
       m.sprite.scale.set((0.45 + Math.min(0.75, m.commits * 0.008)) / Math.max(0.3, zoom));
     }
 
-    /* ----- orbit guide lines ----- */
+    /* ----- orbit trails (short arcs behind each body, not a full grid) ----- */
     orbitGfx.clear();
     for (const b of branches) {
       if (b.state === "infall") continue;
-      orbitGfx.circle(0, 0, orbitRadiusFor(b.slot)).stroke({ color: b.tint, alpha: 0.1, width: 1 });
+      orbitGfx
+        .arc(0, 0, orbitRadiusFor(b.slot), b.orbitAngle - 0.5, b.orbitAngle)
+        .stroke({ color: b.tint, alpha: 0.18, width: 1.5 });
     }
     for (const m of moons) {
       orbitGfx
-        .circle(0, 0, displayR * 1.5 + 26 + m.slot * 14)
-        .stroke({ color: 0xe8ecff, alpha: 0.035, width: 1 });
+        .arc(0, 0, displayR * 1.5 + 26 + m.slot * 14, m.angle - 0.55, m.angle)
+        .stroke({ color: 0xc9d4ff, alpha: 0.13, width: 1.5 });
     }
 
     /* ----- comets ----- */
@@ -1067,36 +1197,25 @@ export async function createSketch(
       if (!c?.active) continue;
       c.age += dtMs;
       const k = clamp01(c.age / c.dur);
-      const sector = sectors[c.cluster % sectors.length];
-      const file = sector?.files[c.fileIndex];
-      // Homing target tracks the rotating planet.
-      let tx = 0;
-      let ty = 0;
-      if (sector && file) {
-        const t = sector.a0 + (sector.a1 - sector.a0) * file.angleFrac;
-        const r = rimAt(t, R) * (0.22 + file.radFrac * 0.66);
-        tx = Math.cos(t) * r;
-        ty = Math.sin(t) * r;
-      }
       const ease = k * k;
-      const x = c.fromX + (tx - c.fromX) * ease;
-      const y = c.fromY + (ty - c.fromY) * ease;
+      const x = c.fromX + (c.tx - c.fromX) * ease;
+      const y = c.fromY + (c.ty - c.fromY) * ease;
       c.head.position.set(x, y);
       c.trailCarry += dtMs;
-      while (c.trailCarry > 18) {
-        c.trailCarry -= 18;
-        burst(x, y, 1, EMBER, 0.02);
+      while (c.trailCarry > 34) {
+        c.trailCarry -= 34;
+        burst(x, y, 1, EMBER, 0.012);
       }
       if (k >= 1) {
         c.active = false;
         c.head.destroy();
         comets.splice(i, 1);
-        if (sector) sector.flash = Math.min(1, sector.flash + 0.5);
-        if (file) file.ignite = 1;
+        const sec = sectorByKey.get(c.key);
+        if (sec) sec.flash = Math.min(1, sec.flash + 0.5);
         if (!reducedMotion) {
-          shake.kick(0.12 + c.magnitude * 0.2);
-          burst(tx, ty, Math.round(10 + c.magnitude * 16), EMBER, 0.22);
-          shockwave(tx, ty, 1.2 + c.magnitude, 700, EMBER);
+          shake.kick(0.03 + c.magnitude * 0.05);
+          burst(c.tx, c.ty, Math.round(5 + c.magnitude * 8), EMBER, 0.14);
+          shockwave(c.tx, c.ty, 0.6 + c.magnitude * 0.5, 700, EMBER);
         }
       }
     }
@@ -1185,26 +1304,25 @@ export async function createSketch(
       text.alpha += (goal - text.alpha) * Math.min(1, dtMs / 250);
     };
     for (const s of sectors) {
-      const mid = (s.a0 + s.a1) / 2;
-      const lr = rimAt(mid, R) + 22;
-      s.label.text = `${s.name}/`;
-      s.label.position.set(Math.cos(mid) * lr, Math.sin(mid) * lr);
+      s.label.text = groupMode === 0 ? `${s.name}/` : s.name;
+      s.label.position.set(s.cx, s.cy);
       s.label.rotation = -world.rotation;
-      s.label.scale.set(1 / Math.max(0.45, zoom));
-      labelFade(s.label, labelsOn && s.a1 - s.a0 > 0.18, 0.8);
+      // Scale with the planet radius (world space) so labels grow with it.
+      s.label.scale.set(Math.max(0.7, R / 220));
+      labelFade(s.label, labelsOn && s.areaFrac >= 0.03, 0.95);
     }
     for (const b of branches) {
       b.label.text = `${b.name} · ${b.commits}`;
       b.label.position.set(b.x, b.y - b.r - 14 / Math.max(0.3, zoom));
       b.label.rotation = -world.rotation;
-      b.label.scale.set(1 / Math.max(0.45, zoom));
+      b.label.scale.set(1 / Math.max(0.22, zoom));
       labelFade(b.label, false, 0.9); // names live in the sidebar + hover
     }
     for (const m of moons) {
       m.label.text = m.name.split(" ")[0] ?? m.name;
       m.label.position.set(m.x, m.y - 13 / Math.max(0.3, zoom));
       m.label.rotation = -world.rotation;
-      m.label.scale.set(1 / Math.max(0.45, zoom));
+      m.label.scale.set(1 / Math.max(0.22, zoom));
       labelFade(m.label, labelsOn, 0.5);
     }
 
@@ -1247,8 +1365,9 @@ export async function createSketch(
       if (!tip) {
         const s = sectorAtWorld(wx, wy);
         if (s) {
-          const pct = Math.round(((s.a1 - s.a0) / (Math.PI * 2)) * 100);
-          tip = `${s.name}/ · ${pct}% of planet · ${s.commits} commits`;
+          const pct = Math.round((s.areaFrac ?? 0) * 100);
+          const nm = groupMode === 0 ? `${s.name}/` : s.name;
+          tip = `${nm} · ${pct}% of planet · ${s.commits} commits`;
         }
       }
     }
@@ -1276,10 +1395,9 @@ export async function createSketch(
     /* ----- camera ----- */
     const ringSpan =
       releaseFactors.length > 0 ? (releaseFactors[releaseFactors.length - 1] ?? 1.4) : 1.3;
-    const farthest = branches.reduce(
-      (acc, b) => Math.max(acc, orbitRadiusFor(b.slot) + b.r + 20),
-      Math.max(R * ringSpan + 30, displayR * 1.5 + 26 + moons.length * 14 + 24),
-    );
+    // Fit the planet (+ its release rings) only, never the transient asteroids,
+    // so merges no longer make the viewport re-zoom and jump.
+    const farthest = Math.max(displayR * 1.34, R * Math.min(ringSpan + 0.1, 1.7));
     const minDim = Math.min(
       chrome.contentWidth(app.screen.width),
       chrome.contentHeight(app.screen.height),
@@ -1299,13 +1417,12 @@ export async function createSketch(
     chrome.update(dtMs, app.screen.width, app.screen.height, player.progress, [
       ["files", fileCount],
       ["mass", Math.round(mass)],
-      ["branches", branches.length],
-      ["moons", moons.length],
+      ["dirs", sectors.length],
       ["era", roman(era)],
     ]);
     hud.update(
       dtMs,
-      `mass ${Math.round(mass)} · files ${fileCount} · branches ${branches.length} · moons ${moons.length} · era ${roman(era)} ${(player.progress * 100).toFixed(0)}%`,
+      `mass ${Math.round(mass)} · files ${fileCount} · ${sectors.length} directories · era ${roman(era)} ${(player.progress * 100).toFixed(0)}%`,
     );
   };
 
@@ -1317,30 +1434,38 @@ export async function createSketch(
       boot.destroy();
     },
     transport,
+    capture: makeCaptureHandle(app, {
+      title: repoName,
+      history: history,
+      accent: 0x9a8cff,
+      setChromeHidden: (b) => chrome.setHidden(b),
+      setHudVisible: (b) => hud.setVisible(b),
+      setLabels: (b) => {
+        labelsOn = b;
+      },
+    }),
     controls: [
       {
-        key: "rotation",
-        label: "world rotation",
-        kind: "range",
-        min: 0,
-        max: 3,
-        step: 0.1,
-        value: 1,
-        set: (v) => {
-          params.rotation = v as number;
-        },
+        key: "mode",
+        label: "view by (also G)",
+        kind: "enum",
+        options: [
+          { label: "directory", value: 0 },
+          { label: "author", value: 1 },
+          { label: "language", value: 2 },
+        ],
+        value: 0,
+        set: (v) => switchMode(v as number),
       },
       {
-        key: "mergeSize",
-        label: "merge planet size",
+        key: "count",
+        label: "top authors / languages",
         kind: "range",
-        min: 0.5,
-        max: 2,
-        step: 0.1,
-        value: 1,
-        set: (v) => {
-          params.mergeSize = v as number;
-        },
+        min: 6,
+        max: 24,
+        step: 1,
+        value: 14,
+        set: (v) => setTopCount(v as number),
       },
       {
         key: "cometAt",

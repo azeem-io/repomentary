@@ -17,6 +17,7 @@ import {
   EventPlayer,
   easeOutBack,
   FrameGovernor,
+  makeCaptureHandle,
   makeDotTexture,
   makeGlowTexture,
   type SketchInstance,
@@ -840,7 +841,6 @@ export async function createSketch(
         }
         sendCaravan(e.cluster, e.magnitude);
         personArrives(e.author, e.cluster, simSec);
-        focusOn(city, 0.1);
         break;
       }
       case "massDelete":
@@ -850,7 +850,6 @@ export async function createSketch(
       case "release":
         if (e.label) raiseMonument(e.label);
         festival();
-        focusOn(cityOf(capitalCluster), 0.5);
         break;
       case "newContributor":
         break;
@@ -862,25 +861,22 @@ export async function createSketch(
 
   /* ------------------------------- interaction ------------------------------- */
 
-  // Ken Burns camera: drifts toward where history is happening.
-  const capitalHome = cityOf(capitalCluster);
-  const focus = { x: capitalHome.x, y: capitalHome.y, tx: capitalHome.x, ty: capitalHome.y };
-  let zoomPulse = 0;
-  let lastFocusMove = -9999;
-  const focusOn = (city: City, strength = 0.12) => {
-    // throttled so the camera moves at most about once a second
-    if (clock - lastFocusMove < 900) return;
-    lastFocusMove = clock;
-    const cw = chrome.contentWidth(app.screen.width);
-    const ch = chrome.contentHeight(app.screen.height);
-    // Blend the target toward the active city (bounded so edges stay visible).
-    focus.tx = focus.tx + (city.x - focus.tx) * strength;
-    focus.ty = focus.ty + (city.y - focus.ty) * strength;
-    // keep the pan small; cities must stay in frame
-    focus.tx = Math.max(cw * 0.44, Math.min(cw * 0.56, focus.tx));
-    focus.ty = Math.max(ch * 0.44, Math.min(ch * 0.56, focus.ty));
-    zoomPulse = Math.min(0.35, zoomPulse + strength * 0.18);
-  };
+  // Centre-locked camera (like stained glass): the pivot is the fixed map
+  // centre; zoom only ever eases OUT to keep every founded city in frame.
+  let camMinX = Number.POSITIVE_INFINITY;
+  let camMaxX = Number.NEGATIVE_INFINITY;
+  let camMinY = Number.POSITIVE_INFINITY;
+  let camMaxY = Number.NEGATIVE_INFINITY;
+  for (const c of cities) {
+    camMinX = Math.min(camMinX, c.x);
+    camMaxX = Math.max(camMaxX, c.x);
+    camMinY = Math.min(camMinY, c.y);
+    camMaxY = Math.max(camMaxY, c.y);
+  }
+  const worldCx = (camMinX + camMaxX) / 2;
+  const worldCy = (camMinY + camMaxY) / 2;
+  const ZMAX = 1.8;
+  let camZoom = ZMAX;
 
   const toWorld = (sx: number, sy: number): { x: number; y: number } => {
     const cw = chrome.contentWidth(app.screen.width);
@@ -1367,20 +1363,24 @@ export async function createSketch(
     }
     setTip(tipMsg);
 
-    /* ----- Ken Burns camera ----- */
+    /* ----- camera: centre-locked, monotonic zoom-out to fit all cities ----- */
     {
       const cw = chrome.contentWidth(app.screen.width);
       const ch = chrome.contentHeight(app.screen.height);
-      // Target slowly relaxes back to the map center between beats.
-      focus.tx += (cw / 2 - focus.tx) * Math.min(1, dtMs / 9000);
-      focus.ty += (ch / 2 - focus.ty) * Math.min(1, dtMs / 9000);
-      focus.x += (focus.tx - focus.x) * Math.min(1, dtMs / 5200);
-      focus.y += (focus.ty - focus.y) * Math.min(1, dtMs / 5200);
-      zoomPulse = Math.max(0, zoomPulse - dtMs / 6000);
-      const z = reducedMotion ? 1 : 1.01 + zoomPulse * 0.025 + 0.006 * Math.sin(clock * 0.00004);
-      world.pivot.set(focus.x, focus.y);
+      let halfX = 60;
+      let halfY = 60;
+      for (const city of cities) {
+        if (!city.founded) continue;
+        const r = cityRadius(city) + 22;
+        halfX = Math.max(halfX, Math.abs(city.x - worldCx) + r);
+        halfY = Math.max(halfY, Math.abs(city.y - worldCy) + r);
+      }
+      const targetZoom = Math.min((cw * 0.9) / (2 * halfX), (ch * 0.9) / (2 * halfY), ZMAX);
+      const desired = Math.min(camZoom, targetZoom); // never zoom back in
+      camZoom += (desired - camZoom) * (reducedMotion ? 1 : Math.min(1, dtMs / 900));
+      world.pivot.set(worldCx, worldCy);
       world.position.set(cw / 2, ch / 2);
-      world.scale.set(z);
+      world.scale.set(camZoom);
     }
 
     /* ----- chrome ----- */
@@ -1406,6 +1406,13 @@ export async function createSketch(
       boot.destroy();
     },
     transport,
+    capture: makeCaptureHandle(app, {
+      title: repoName,
+      history: history,
+      accent: AMBER,
+      setChromeHidden: (b) => chrome.setHidden(b),
+      setHudVisible: (b) => hud.setVisible(b),
+    }),
     controls: [
       {
         key: "people",

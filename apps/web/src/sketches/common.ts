@@ -1,14 +1,16 @@
 import type { RepoEvent, Rng, SyntheticHistory } from "@repomentary/artifact";
-import { Application, Container, Text, Texture } from "pixi.js";
+import { Application, Color, Container, Graphics, Rectangle, Text, Texture } from "pixi.js";
 
 /** A live-tunable parameter a sketch exposes to the host's control panel. */
 export interface SketchControl {
   key: string;
   label: string;
-  kind: "range" | "toggle";
+  kind: "range" | "toggle" | "enum";
   min?: number;
   max?: number;
   step?: number;
+  /** For kind "enum": selectable options, rendered as segmented buttons. */
+  options?: { label: string; value: number }[];
   value: number | boolean;
   set: (v: number | boolean) => void;
 }
@@ -20,6 +22,8 @@ export interface SketchInstance {
   controls?: SketchControl[];
   /** Optional playback transport (pause / fast-forward / scrub / reset). */
   transport?: Transport;
+  /** Optional export hook: render frames at any size, toggle chrome, badge. */
+  capture?: CaptureHandle;
 }
 
 export interface SketchBoot {
@@ -149,6 +153,11 @@ export class Hud {
     this.text.position.set(12, 56);
     ui.addChild(this.text);
     this.base = `${rendererName}${reducedMotion ? " · reduced motion" : ""}`;
+  }
+
+  /** Hide/show the readout (export-clean frames). */
+  setVisible(v: boolean): void {
+    this.text.visible = v;
   }
 
   /** Call once per frame. */
@@ -426,3 +435,228 @@ export const easeOutBack = (x: number): number => {
   return 1 + c3 * (x - 1) ** 3 + c1 * (x - 1) ** 2;
 };
 export const clamp01 = (x: number): number => Math.min(1, Math.max(0, x));
+
+/* ------------------------------ export -------------------------------- */
+
+/** In-canvas elements the export dialog can hide for a clean frame. */
+export interface ExportUi {
+  /** FilmChrome: sidebar, timeline, date tape. */
+  chrome: boolean;
+  /** fps / renderer readout. */
+  hud: boolean;
+  /** In-view labels. */
+  labels: boolean;
+}
+
+/** A minimal, cinematic caption layer drawn only for exports. */
+export interface BadgeOptions {
+  show: boolean;
+  date: boolean;
+  title: boolean;
+  wordmark: boolean;
+  permalink: boolean;
+  progress: boolean;
+  permalinkText: string;
+  accent: number;
+}
+
+const DEFAULT_BADGE: BadgeOptions = {
+  show: false,
+  date: true,
+  title: true,
+  wordmark: true,
+  permalink: false,
+  progress: true,
+  permalinkText: "",
+  accent: 0xffffff,
+};
+
+/**
+ * Optional caption layer for exports: date, repo title, a progress bar, and
+ * a small wordmark / permalink. Lives above the scene so `extract` captures
+ * it. Hidden until the export dialog turns parts on.
+ */
+export class ExportBadge extends Container {
+  private gfx = new Graphics();
+  private dateText: Text;
+  private titleText: Text;
+  private markText: Text;
+  private linkText: Text;
+  private opts: BadgeOptions;
+
+  constructor(accent: number, title: string) {
+    super();
+    this.opts = { ...DEFAULT_BADGE, accent };
+    const mono = (size: number, fill: number, weight: "normal" | "bold" = "normal"): Text => {
+      const t = new Text({
+        text: "",
+        style: { fontFamily: "monospace", fontSize: size, fill, fontWeight: weight },
+      });
+      this.addChild(t);
+      return t;
+    };
+    this.addChild(this.gfx);
+    this.dateText = mono(26, 0xffffff, "bold");
+    this.titleText = mono(15, 0xffffff);
+    this.markText = mono(15, accent, "bold");
+    this.markText.text = "repomentary";
+    this.linkText = mono(12, 0xb9c0e6);
+    this.titleText.text = title;
+    this.visible = false;
+  }
+
+  configure(o: Partial<BadgeOptions>): void {
+    this.opts = { ...this.opts, ...o };
+    this.markText.tint = this.opts.accent;
+    if (o.permalinkText !== undefined) this.linkText.text = o.permalinkText;
+  }
+
+  /** Call once per frame with the current progress, date, and screen size. */
+  update(progress: number, dateStr: string, w: number, h: number): void {
+    const o = this.opts;
+    this.visible = o.show;
+    if (!o.show) return;
+    const pad = Math.round(Math.min(w, h) * 0.045);
+
+    this.gfx.clear();
+
+    this.dateText.visible = o.date && dateStr !== "";
+    if (this.dateText.visible) {
+      this.dateText.text = dateStr;
+      this.dateText.position.set(pad, pad);
+    }
+
+    this.titleText.visible = o.title;
+    if (o.title) this.titleText.position.set(pad, o.date ? pad + 32 : pad);
+
+    this.markText.visible = o.wordmark;
+    if (o.wordmark) this.markText.position.set(w - this.markText.width - pad, pad);
+
+    this.linkText.visible = o.permalink && this.linkText.text !== "";
+    if (this.linkText.visible) this.linkText.position.set(pad, h - this.linkText.height - pad);
+
+    if (o.progress) {
+      const barY = h - pad;
+      const barW = w - pad * 2;
+      this.gfx.roundRect(pad, barY - 3, barW, 3, 1.5).fill({ color: 0xffffff, alpha: 0.18 });
+      this.gfx
+        .roundRect(pad, barY - 3, Math.max(2, barW * clamp01(progress)), 3, 1.5)
+        .fill({ color: o.accent, alpha: 0.95 });
+    }
+  }
+}
+
+/** What the export dialog drives: framing, UI toggles, badge, and PNG grab. */
+export interface CaptureHandle {
+  readonly app: Application;
+  readonly title: string;
+  /** The view's background colour as a hex string (for letterbox fill). */
+  readonly backgroundHex: string;
+  /** Show/hide in-canvas chrome, hud, labels. */
+  applyUi(ui: Partial<ExportUi>): void;
+  /** Configure the cinematic badge layer. */
+  configureBadge(o: Partial<BadgeOptions>): void;
+  /** Update the badge for the current frame (call each rAF while previewing). */
+  tickBadge(progress: number): void;
+  /** Human date at a timeline fraction (empty if no history wired). */
+  dateAt(progress: number): string;
+  /** Render the current frame at exact pixel size and return a PNG blob. */
+  capturePng(width: number, height: number, bg: "scene" | "black" | "transparent"): Promise<Blob>;
+}
+
+function canvasToBlob(canvas: HTMLCanvasElement, type: string): Promise<Blob> {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob((b) => (b ? resolve(b) : reject(new Error("toBlob failed"))), type);
+  });
+}
+
+/**
+ * Draws `src` centred inside a `width`x`height` frame, scaled to fit entirely
+ * (contain): always fills the width/height it can and pads the rest with the
+ * fill colour (letterbox) — never crops. `fill: null` keeps it transparent.
+ */
+export function compositeContain(
+  src: CanvasImageSource & { width: number; height: number },
+  width: number,
+  height: number,
+  fill: string | null,
+): HTMLCanvasElement {
+  const out = document.createElement("canvas");
+  out.width = width;
+  out.height = height;
+  const ctx = out.getContext("2d");
+  if (!ctx) throw new Error("2D canvas unavailable");
+  if (fill) {
+    ctx.fillStyle = fill;
+    ctx.fillRect(0, 0, width, height);
+  }
+  const scale = Math.min(width / src.width, height / src.height);
+  const dw = src.width * scale;
+  const dh = src.height * scale;
+  ctx.drawImage(src, (width - dw) / 2, (height - dh) / 2, dw, dh);
+  return out;
+}
+
+/**
+ * Builds the export handle for a sketch. Views wire their chrome/hud/labels
+ * setters and (optionally) a history for the date readout; everything else
+ * (framing, extract, badge) is generic.
+ */
+export function makeCaptureHandle(
+  app: Application,
+  opts: {
+    title: string;
+    history?: { startDateMs: number; spanMs: number };
+    accent?: number;
+    setChromeHidden?: (b: boolean) => void;
+    setHudVisible?: (b: boolean) => void;
+    setLabels?: (b: boolean) => void;
+  },
+): CaptureHandle {
+  const badge = new ExportBadge(opts.accent ?? 0xffffff, opts.title);
+  app.stage.addChild(badge);
+  const backgroundHex = new Color(app.renderer.background.color).toHex();
+  let lastProgress = 0;
+
+  const dateAt = (p: number): string => {
+    if (!opts.history) return "";
+    const d = new Date(opts.history.startDateMs + clamp01(p) * opts.history.spanMs);
+    return d.toLocaleDateString("en-US", { year: "numeric", month: "short", day: "2-digit" });
+  };
+
+  return {
+    app,
+    title: opts.title,
+    backgroundHex,
+    applyUi(ui) {
+      if (ui.chrome !== undefined) opts.setChromeHidden?.(!ui.chrome);
+      if (ui.hud !== undefined) opts.setHudVisible?.(ui.hud);
+      if (ui.labels !== undefined) opts.setLabels?.(ui.labels);
+    },
+    configureBadge(o) {
+      badge.configure(o);
+    },
+    tickBadge(progress) {
+      lastProgress = progress;
+      badge.update(progress, dateAt(progress), app.screen.width, app.screen.height);
+    },
+    dateAt,
+    async capturePng(width, height, bg) {
+      const r = app.renderer;
+      const sw = app.screen.width;
+      const sh = app.screen.height;
+      app.stage.setChildIndex(badge, app.stage.children.length - 1);
+      badge.update(lastProgress, dateAt(lastProgress), sw, sh);
+      r.render(app.stage);
+      // The renderer is already at export resolution (the dialog raises it on
+      // open); extract at 2x and letterbox-fit into the frame.
+      const src = r.extract.canvas({
+        target: app.stage,
+        frame: new Rectangle(0, 0, sw, sh),
+        resolution: 2,
+      }) as HTMLCanvasElement;
+      const fill = bg === "transparent" ? null : bg === "black" ? "#000000" : backgroundHex;
+      return await canvasToBlob(compositeContain(src, width, height, fill), "image/png");
+    },
+  };
+}

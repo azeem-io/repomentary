@@ -14,6 +14,7 @@ import {
   CameraShake,
   EventPlayer,
   FrameGovernor,
+  makeCaptureHandle,
   makeDotTexture,
   makeGlowTexture,
   type SketchInstance,
@@ -915,6 +916,16 @@ export async function createSketch(
       boot.destroy();
     },
     transport,
+    capture: makeCaptureHandle(app, {
+      title: repoName,
+      history,
+      accent: 0xffd28f,
+      setChromeHidden: (b) => chrome.setHidden(b),
+      setHudVisible: (b) => hud.setVisible(b),
+      setLabels: (b) => {
+        labelsOn = b;
+      },
+    }),
     controls: [
       {
         key: "blimpAt",

@@ -20,6 +20,7 @@ import {
   clamp01,
   consumePendingSeek,
   easeOutCubic,
+  makeCaptureHandle,
   makeGlowTexture,
   makeRingTexture,
   requestRebuildSeek,
@@ -524,6 +525,13 @@ export async function createSketch(
       boot.destroy();
     },
     transport,
+    capture: makeCaptureHandle(app, {
+      title: real.repo,
+      history: real.chromeHistory,
+      accent: ACCENT,
+      setChromeHidden: (b) => chrome.setHidden(b),
+      setHudVisible: (b) => hud.setVisible(b),
+    }),
     controls: [
       {
         key: "speed",

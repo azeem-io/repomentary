@@ -20,6 +20,7 @@ import {
   bootPixi,
   clamp01,
   consumePendingSeek,
+  makeCaptureHandle,
   requestRebuildSeek,
   type SketchInstance,
   type Transport,
@@ -931,6 +932,16 @@ export async function createSketch(
       boot.destroy();
     },
     transport,
+    capture: makeCaptureHandle(app, {
+      title: real.repo,
+      history: real.chromeHistory,
+      accent: COPPER_HI,
+      setChromeHidden: (b) => chrome.setHidden(b),
+      setHudVisible: (b) => hud.setVisible(b),
+      setLabels: (b) => {
+        labelsOn = b;
+      },
+    }),
     controls: [
       {
         key: "labels",

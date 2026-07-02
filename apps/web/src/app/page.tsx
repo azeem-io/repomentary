@@ -30,7 +30,7 @@ const styles = [
     id: "race",
     name: "Race",
     blurb:
-      "A contributor bar-chart race over a streamgraph of activity. No metaphors, just charts.",
+      "A contributor bar-chart race with eased rank swaps and a self-rescaling axis. No metaphors, just charts.",
   },
   {
     id: "planet",
@@ -57,9 +57,9 @@ const styles = [
   },
   {
     id: "tide",
-    name: "Language Tide",
+    name: "Tide",
     blurb:
-      "A streamgraph of languages over time. Flowing bands rise and fall as the codebase shifts from one language to another.",
+      "A streamgraph of the codebase over time. Bands swell and recede as its makeup shifts; switch the split between language, directory, or author.",
   },
   {
     id: "glass",

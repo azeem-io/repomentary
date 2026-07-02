@@ -19,6 +19,7 @@ import {
   bootPixi,
   clamp01,
   consumePendingSeek,
+  makeCaptureHandle,
   makeGlowTexture,
   requestRebuildSeek,
   type SketchInstance,
@@ -848,6 +849,13 @@ export async function createSketch(
       boot.destroy();
     },
     transport,
+    capture: makeCaptureHandle(app, {
+      title: real.repo,
+      history: real.chromeHistory,
+      accent: accentCol,
+      setChromeHidden: (b) => chrome.setHidden(b),
+      setHudVisible: (b) => hud.setVisible(b),
+    }),
     controls: [
       {
         key: "speed",

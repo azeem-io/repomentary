@@ -1,9 +1,11 @@
 /**
  * Pulse: the repo's vital signs as a stack of seismograph lanes, one per top
  * contributor. Time runs left to right; each lane spikes with that person's
- * commit activity and flatlines when they go quiet, so you read who carried
- * which era at a glance. Glowing traces (bloomed), a faint monitor grid,
- * release flags across all lanes, grain and vignette. Trace draws in with time.
+ * commit activity and flatlines when they go quiet. Lanes are ranked live by
+ * cumulative commits up to the playhead, so the running leader rides the top
+ * and lanes swap places (eased, with a flash on the climb) as the lead shifts.
+ * Glowing traces (bloomed), a faint monitor grid, release flags across all
+ * lanes, grain and vignette. Trace draws in with time.
  */
 import { BlurFilter, Container, Graphics, Sprite, Text, Texture, TilingSprite } from "pixi.js";
 import {
@@ -17,6 +19,7 @@ import {
   bootPixi,
   clamp01,
   consumePendingSeek,
+  makeCaptureHandle,
   makeGlowTexture,
   requestRebuildSeek,
   type SketchInstance,
@@ -27,14 +30,6 @@ const INK = 0xe8ecff;
 const PLAY_SECONDS = 110;
 const SLICES = 220;
 
-function hashStr(s: string): number {
-  let h = 2166136261;
-  for (let i = 0; i < s.length; i++) {
-    h ^= s.charCodeAt(i);
-    h = Math.imul(h, 16777619);
-  }
-  return h >>> 0;
-}
 function hslToInt(h: number, sat: number, l: number): number {
   const hh = (((h % 360) + 360) % 360) / 360;
   const a = sat * Math.min(l, 1 - l);
@@ -107,8 +102,15 @@ interface Lane {
   name: string;
   color: number;
   val: number[];
+  cum: number[];
   total: number;
   label: Text;
+  value: Text;
+  y: number;
+  targetY: number;
+  rank: number;
+  flash: number;
+  lastCount: number;
 }
 
 export async function createSketch(
@@ -178,13 +180,33 @@ export async function createSketch(
       style: { fontFamily: "monospace", fontSize: 11, fontWeight: "bold", fill: color },
     });
     label.anchor.set(0, 0.5);
-    labelLayer.addChild(label);
+    const value = new Text({
+      text: "0",
+      style: { fontFamily: "monospace", fontSize: 11, fill: mix(color, 0xffffff, 0.55) },
+    });
+    value.anchor.set(0, 0.5);
+    labelLayer.addChild(label, value);
+    // Running cumulative commit count per slice, for the time-based ranking.
+    const val = perAuthor.get(a) ?? new Array<number>(SLICES).fill(0);
+    const cum = new Array<number>(SLICES);
+    let run = 0;
+    for (let s = 0; s < SLICES; s++) {
+      run += val[s] ?? 0;
+      cum[s] = run;
+    }
     return {
       name,
       color,
-      val: perAuthor.get(a) ?? new Array<number>(SLICES).fill(0),
+      val,
+      cum,
       total: tot,
       label,
+      value,
+      y: Number.NaN,
+      targetY: Number.NaN,
+      rank: i,
+      flash: 0,
+      lastCount: -1,
     };
   });
 
@@ -335,16 +357,32 @@ export async function createSketch(
         .stroke({ color: 0xffd24a, alpha: played ? 0.28 : 0.1, width: 1 });
     }
 
-    for (let k = 0; k < N; k++) {
-      const l = lanes[k]!;
-      const by = laneY(k);
+    // Live standings: rank lanes by cumulative commits up to the playhead, ease
+    // each lane toward its rank's slot, flash the ones that just climbed.
+    const cs = Math.min(SLICES - 1, curI);
+    const cumAt = (l: Lane) => l.cum[cs] ?? 0;
+    const ranked = [...lanes].sort((a, b) => cumAt(b) - cumAt(a) || b.total - a.total);
+    const easeY = reducedMotion ? 1 : Math.min(1, dtMs / 380);
+    ranked.forEach((l, rank) => {
+      if (l.rank !== rank) {
+        if (rank < l.rank) l.flash = 1; // climbed a place
+        l.rank = rank;
+      }
+      l.targetY = laneY(rank);
+      l.y = Number.isFinite(l.y) ? l.y + (l.targetY - l.y) * easeY : l.targetY;
+      l.flash = Math.max(0, l.flash - dtMs / 650);
+    });
+
+    lanes.forEach((l, k) => {
+      const by = l.y;
+      const f = l.flash;
       // filled area under the trace
       fillGfx.moveTo(x0, by);
       for (let i = 0; i <= curI; i++) fillGfx.lineTo(xAt(i), by - vAt(l, i));
       const vC = vAt(l, curI) * (1 - frac) + vAt(l, Math.min(SLICES - 1, curI + 1)) * frac;
       fillGfx.lineTo(xc, by - vC);
       fillGfx.lineTo(xc, by);
-      fillGfx.fill({ color: l.color, alpha: 0.12 });
+      fillGfx.fill({ color: l.color, alpha: 0.12 + 0.18 * f });
 
       // glowing trace
       traceGlow.moveTo(x0, by);
@@ -356,15 +394,15 @@ export async function createSketch(
       traceGlow.lineTo(xc, by - vC);
       traceCore.lineTo(xc, by - vC);
       traceGlow.stroke({
-        width: 3.5,
+        width: 3.5 + 2 * f,
         color: l.color,
-        alpha: 0.5 * params.glow,
+        alpha: (0.5 + 0.4 * f) * params.glow,
         cap: "round",
         join: "round",
       });
       traceCore.stroke({
         width: 1.3,
-        color: mix(l.color, 0xffffff, 0.5),
+        color: mix(l.color, 0xffffff, 0.5 + 0.4 * f),
         alpha: 0.95,
         cap: "round",
         join: "round",
@@ -374,15 +412,23 @@ export async function createSketch(
       const dot = laneDots[k]!;
       dot.position.set(xc, by - vC);
       dot.alpha = 0.9;
-      dot.scale.set(0.4 + 0.2 * Math.sin(clock * 6 + k));
+      dot.scale.set((0.4 + 0.2 * Math.sin(clock * 6 + k)) * (1 + f));
 
-      // lane label
+      // lane label + running commit count
+      const count = l.cum[cs] ?? 0;
       l.label.visible = labelsOn;
+      l.value.visible = labelsOn;
       if (labelsOn) {
         l.label.position.set(18, by);
         l.label.alpha = 0.9;
+        if (l.lastCount !== count) {
+          l.value.text = count.toLocaleString("en-US");
+          l.lastCount = count;
+        }
+        l.value.position.set(18 + l.label.width + 8, by);
+        l.value.alpha = 0.6;
       }
-    }
+    });
 
     vignette.position.set(cw / 2, ch / 2);
     vignette.scale.set((Math.max(cw, ch) * 1.4) / 256);
@@ -392,21 +438,13 @@ export async function createSketch(
     grain.tilePosition.set((grainScroll % 128) | 0, ((grainScroll * 0.7) % 128) | 0);
     grain.alpha = 0.06 * params.grain;
 
-    // who's hottest right now
-    let hot = "—";
-    let hotV = -1;
-    for (const l of lanes) {
-      const v = l.val[Math.min(SLICES - 1, curI)] ?? 0;
-      if (v > hotV) {
-        hotV = v;
-        hot = l.name;
-      }
-    }
+    // current standings leader (cumulative commits up to the playhead)
+    const leaderLane = ranked[0];
     chrome.update(dtMs, app.screen.width, app.screen.height, progress, [
-      ["lanes", N],
-      ["active", hotV > 0 ? hot : "quiet"],
+      ["leader", leaderLane?.name ?? "—"],
+      ["commits", (leaderLane?.cum[cs] ?? 0).toLocaleString("en-US")],
     ]);
-    hud.update(dtMs, `pulse · ${N} contributors`);
+    hud.update(dtMs, `pulse · ${N} contributors · leaderboard`);
   };
 
   app.ticker.add(tick);
@@ -418,6 +456,16 @@ export async function createSketch(
       boot.destroy();
     },
     transport,
+    capture: makeCaptureHandle(app, {
+      title: real.repo,
+      history: real.chromeHistory,
+      accent: lanes[0]?.color ?? 0x5adcff,
+      setChromeHidden: (b) => chrome.setHidden(b),
+      setHudVisible: (b) => hud.setVisible(b),
+      setLabels: (b) => {
+        labelsOn = b;
+      },
+    }),
     controls: [
       {
         key: "labels",

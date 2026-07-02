@@ -108,6 +108,9 @@ export class FilmChrome {
   private heroShown = 0;
   private branchNames = new Map<number, string>();
 
+  // export-clean mode: hide all chrome and let the viz fill the whole frame
+  private hidden = false;
+
   constructor(
     ui: Container,
     private history: SyntheticHistory,
@@ -216,7 +219,9 @@ export class FilmChrome {
         this.pushFeed(`+ ${e.label ?? "branch"} opened`);
         return;
       case "merge": {
-        this.bumpAuthor(e.author, 2);
+        // A PR/merge commit counts once, same as a plain commit, so the
+        // leaderboard reads true per-author commit totals (matches the views).
+        this.bumpAuthor(e.author, 1);
         const name = e.label ?? (e.branch ? this.branchNames.get(e.branch) : undefined);
         this.pushFeed(`⊕ ${name ?? "branch"} merged`);
         return;
@@ -265,12 +270,23 @@ export class FilmChrome {
     this.feed = [];
   }
 
+  /**
+   * Hide every chrome element and release the content clip so the viz fills
+   * the full frame (clean export). Views re-center automatically because they
+   * read contentWidth/contentHeight, which return the full screen while hidden.
+   */
+  setHidden(hidden: boolean): void {
+    this.hidden = hidden;
+    this.root.visible = !hidden;
+    if (this.opts.clip) this.opts.clip.mask = hidden ? null : this.contentMask;
+  }
+
   contentWidth(screenW: number): number {
-    return screenW - this.sidebarWidth;
+    return this.hidden ? screenW : screenW - this.sidebarWidth;
   }
 
   contentHeight(screenH: number): number {
-    return screenH - this.timelineHeight;
+    return this.hidden ? screenH : screenH - this.timelineHeight;
   }
 
   private bumpAuthor(author: number, amount: number): void {
@@ -307,6 +323,7 @@ export class FilmChrome {
     progress: number,
     stats: [string, string | number][],
   ): void {
+    if (this.hidden) return; // export-clean: nothing to draw
     const accent = this.opts.accent;
     const sbX = screenW - this.sidebarWidth;
     const contentW = sbX;

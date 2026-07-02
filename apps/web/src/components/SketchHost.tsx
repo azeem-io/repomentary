@@ -2,13 +2,14 @@
 
 import { useEffect, useReducer, useRef, useState } from "react";
 import DatasetPicker from "@/components/DatasetPicker";
+import ExportDialog from "@/components/ExportDialog";
 import { TransitionLink } from "@/components/PageTransition";
 import { Button } from "@/components/ui/button";
 import { Slider } from "@/components/ui/slider";
 import { Switch } from "@/components/ui/switch";
 import { SimpleTooltip } from "@/components/ui/tooltip";
 import { getDatasetId } from "@/lib/realHistory";
-import type { SketchControl, SketchInstance, Transport } from "@/sketches/common";
+import type { CaptureHandle, SketchControl, SketchInstance, Transport } from "@/sketches/common";
 
 const loaders = {
   planet: () => import("@/sketches/planet"),
@@ -42,6 +43,8 @@ export default function SketchHost({ kind, title, hint }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [controls, setControls] = useState<SketchControl[] | null>(null);
   const [transport, setTransport] = useState<Transport | null>(null);
+  const [capture, setCapture] = useState<CaptureHandle | null>(null);
+  const [exportOpen, setExportOpen] = useState(false);
   const [panelOpen, setPanelOpen] = useState(false);
   // null until mounted (SSR can't read localStorage); changing it remounts
   // the sketch on the newly selected repo.
@@ -88,6 +91,7 @@ export default function SketchHost({ kind, title, hint }: Props) {
         instance = created;
         setControls(created.controls ?? null);
         setTransport(created.transport ?? null);
+        setCapture(created.capture ?? null);
       })
       .catch((err: unknown) => {
         if (controller.signal.aborted) return; // cancelled, not a real error
@@ -103,8 +107,12 @@ export default function SketchHost({ kind, title, hint }: Props) {
         // already torn down
       }
       instance = null;
-      setControls(null);
-      setTransport(null);
+      // NOTE: do not null controls/transport/capture or close the dialog here.
+      // Backward scrubs and range exports rebuild the sketch (generation bump);
+      // the export dialog is gated on `capture && transport`, so nulling them
+      // would unmount it mid-rebuild and lose the queued export. Keep the (now
+      // stale) handles until the fresh instance replaces them a tick later; the
+      // destroyed app's ticker is stopped, so nothing fires against it.
     };
   }, [kind, dataset, generation]);
 
@@ -175,6 +183,19 @@ export default function SketchHost({ kind, title, hint }: Props) {
               ⟲
             </Button>
           </SimpleTooltip>
+          {capture && (
+            <SimpleTooltip content="export image / video">
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                onClick={() => setExportOpen(true)}
+                className="pointer-events-auto h-8 bg-black/30 px-3 font-mono text-xs text-star/70 shadow-none backdrop-blur hover:bg-black/40 hover:text-star"
+              >
+                ⤓ export
+              </Button>
+            </SimpleTooltip>
+          )}
         </div>
       )}
 
@@ -184,8 +205,32 @@ export default function SketchHost({ kind, title, hint }: Props) {
             <div className="w-64 space-y-2.5 rounded-xl border border-star/15 bg-deep/85 p-3 backdrop-blur">
               {controls.map((c) => (
                 <div key={c.key}>
-                  {c.kind === "range" ? (
-                    <label className="block">
+                  {c.kind === "enum" ? (
+                    <div className="space-y-1.5">
+                      <span className="font-mono text-[11px] text-star/70">{c.label}</span>
+                      <div className="flex gap-1 rounded-lg border border-star/15 bg-void/40 p-1">
+                        {(c.options ?? []).map((o) => (
+                          <button
+                            key={o.value}
+                            type="button"
+                            onClick={() => {
+                              c.value = o.value;
+                              c.set(o.value);
+                              rerender();
+                            }}
+                            className={`flex-1 rounded-md px-2 py-1 font-mono text-[11px] transition-colors ${
+                              c.value === o.value
+                                ? "bg-amber/20 text-amber"
+                                : "text-dim hover:bg-star/10 hover:text-star"
+                            }`}
+                          >
+                            {o.label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  ) : c.kind === "range" ? (
+                    <div className="block">
                       <span className="flex justify-between font-mono text-[11px] text-star/70">
                         <span>{c.label}</span>
                         <span className="text-star/45">
@@ -207,9 +252,9 @@ export default function SketchHost({ kind, title, hint }: Props) {
                         }}
                         className="mt-2 [&_[data-slot=slider-track]]:bg-star/15"
                       />
-                    </label>
+                    </div>
                   ) : (
-                    <label className="flex items-center justify-between font-mono text-[11px] text-star/70">
+                    <div className="flex items-center justify-between font-mono text-[11px] text-star/70">
                       <span>{c.label}</span>
                       <Switch
                         checked={c.value === true}
@@ -219,7 +264,7 @@ export default function SketchHost({ kind, title, hint }: Props) {
                           rerender();
                         }}
                       />
-                    </label>
+                    </div>
                   )}
                 </div>
               ))}
@@ -235,6 +280,18 @@ export default function SketchHost({ kind, title, hint }: Props) {
             {panelOpen ? "✕ tuning" : "⚙ tuning"}
           </Button>
         </div>
+      )}
+
+      {capture && transport && (
+        <ExportDialog
+          open={exportOpen}
+          onClose={() => setExportOpen(false)}
+          capture={capture}
+          transport={transport}
+          controls={controls ?? []}
+          viewName={title}
+          viewId={kind}
+        />
       )}
 
       {error && (
